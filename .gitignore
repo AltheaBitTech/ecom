@@ -1,0 +1,7 @@
+# Keep reference PDFs and the local dev launcher out of the repo
+*.pdf
+dev.sh
+
+# Build/test artifacts
+.next/
+output/

@@ -1,0 +1,194 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --font-display: var(--font-fraunces);
+  --color-tertiary: var(--tertiary);
+  --color-tertiary-foreground: var(--tertiary-foreground);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* Stallwart — teal/coral/amber, matching the landing page scene gradients */
+  --background: #fdfbf6;
+  --foreground: #1d2b2e;
+  --card: #ffffff;
+  --card-foreground: #1d2b2e;
+  --popover: #ffffff;
+  --popover-foreground: #1d2b2e;
+  --primary: #e2643c;
+  --primary-foreground: #ffffff;
+  --secondary: #f1ede1;
+  --secondary-foreground: #1d2b2e;
+  --tertiary: #14505c;
+  --tertiary-foreground: #ffffff;
+  --muted: #f1ede1;
+  --muted-foreground: #5c7176;
+  --accent: #ffe9d1;
+  --accent-foreground: #1d2b2e;
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: #e9dfcd;
+  --input: #e9dfcd;
+  --ring: #e2643c;
+  --chart-1: #e2643c;
+  --chart-2: #14505c;
+  --chart-3: #e8a34c;
+  --chart-4: #2b7a80;
+  --chart-5: #a94f2e;
+  --radius: 1rem;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1d2b2e;
+  --sidebar-primary: #e2643c;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f1ede1;
+  --sidebar-accent-foreground: #1d2b2e;
+  --sidebar-border: #e9dfcd;
+  --sidebar-ring: #e2643c;
+}
+
+.dark {
+  /* True black, same coral/teal/amber accents as light mode */
+  --background: #000000;
+  --foreground: #f3ede0;
+  --card: #0a0a0a;
+  --card-foreground: #f3ede0;
+  --popover: #000000;
+  --popover-foreground: #f3ede0;
+  --primary: #e2643c;
+  --primary-foreground: #ffffff;
+  --secondary: #111111;
+  --secondary-foreground: #f3ede0;
+  --tertiary: #2b7a80;
+  --tertiary-foreground: #000000;
+  --muted: #111111;
+  --muted-foreground: #9aa8a6;
+  --accent: #16545e;
+  --accent-foreground: #f3ede0;
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: #e2643c;
+  --chart-1: #e2643c;
+  --chart-2: #2b7a80;
+  --chart-3: #e8a34c;
+  --chart-4: #14505c;
+  --chart-5: #c9633a;
+  --sidebar: #000000;
+  --sidebar-foreground: #f3ede0;
+  --sidebar-primary: #e2643c;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #111111;
+  --sidebar-accent-foreground: #f3ede0;
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: #e2643c;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1, h2, h3 {
+    @apply font-display font-semibold tracking-tight;
+  }
+}
+
+/* Material You's signature "emphasized decelerate" easing, for landing-page motion. */
+@theme inline {
+  --ease-md: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Ambient drift for landing-page gradient scene glows — slow, so it reads as atmosphere, not distraction. */
+@keyframes scene-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(3%, -4%) scale(1.08); }
+}
+.animate-scene-drift {
+  animation: scene-drift 16s ease-in-out infinite;
+}
+
+/* Hero glass chips bob over the 3D stack, offset per chip so they never move in lockstep. */
+@keyframes hero-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-14px); }
+}
+.animate-hero-float {
+  animation: hero-float 7s ease-in-out infinite;
+}
+
+/* Halo behind each hero badge icon — breathes out and fades, so the badge reads as live. */
+@keyframes hero-pulse {
+  0%, 100% { opacity: 0.18; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(1.25); }
+}
+.animate-hero-pulse {
+  animation: hero-pulse 4.5s ease-in-out infinite;
+  filter: blur(2px);
+}
+
+/* Fine film grain over the saturated hero/CTA gradients — kills banding, adds depth. */
+.grain::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.32'/%3E%3C/svg%3E");
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

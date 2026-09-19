@@ -1,0 +1,34 @@
+'use client';
+import { StoreLink as Link } from '@/components/storefront/store-link';
+import { ArrowUpRight, ArrowRight, ShieldCheck, Truck, PackageCheck, Star, Leaf } from 'lucide-react';
+import { useStore, StoreLoading } from '@/components/storefront/store-provider';
+import { ProductImage, ProductSection } from '@/components/storefront/product-card';
+import { OffersBanner } from '@/components/storefront/offers';
+import { money } from '@/lib/storefront';
+
+export default function StorePage() {
+  const { store } = useStore();
+  if (!store) return <StoreLoading />;
+  const { settings, products, reviews } = store;
+  const heroProduct = products.find((p) => p.featured && p.imageUrl) ?? products.find((p) => p.imageUrl);
+  const categories = [...new Set(products.map((p) => p.category))];
+  const best = products.filter((p) => p.sold > 0).sort((a, b) => b.sold - a.sold);
+  const faq = settings.faq.length ? settings.faq : [
+    { question: 'How do I place an order?', answer: 'Choose your products and options, add them to your bag, then enter your contact and delivery details at checkout. Pay securely through Razorpay.' },
+    { question: 'How do promo codes work?', answer: 'Find available codes on our offers page. Apply one in your bag or at checkout. We’ll show the savings and any minimum-spend requirements before you pay.' },
+    { question: 'What are my delivery options?', answer: settings.deliveryNote },
+    { question: 'Can I return an item?', answer: 'Please see our refund policy for eligible items and how to request a return. Contact the store if you need help with an order.' },
+  ];
+  return <>
+    <section className="store-hero"><div className="store-container hero-grid"><div className="hero-copy"><p className="store-eyebrow"><span className="inline-block h-px w-7 bg-current align-middle" /> {settings.tagline}</p><h1>{settings.headline}</h1><p className="hero-description">{settings.description}</p><div className="mt-8 flex flex-wrap items-center gap-6"><Link href="/store/products" className="store-button">Shop the collection <ArrowUpRight size={18} /></Link><a href="#collections" className="store-text-link">Take a look around <ArrowRight size={16} /></a></div><div className="hero-note"><Leaf size={17} strokeWidth={1.4} /><span>Thoughtful finds. Simple pleasures.</span></div></div><div className="hero-art"><ProductImage src={settings.heroImage || heroProduct?.imageUrl} alt={settings.heroImage ? store.name + ' collection' : heroProduct?.name ?? 'Explore our collection'} className="hero-photo" eager /><span className="hero-orbit" aria-hidden>GOOD THINGS<br />START HERE</span>{heroProduct && <Link href={`/store/products/${heroProduct.id}`} className="hero-product-note"><div><small>MEET YOUR NEXT FAVOURITE</small><strong>{heroProduct.name}</strong></div><ArrowUpRight size={22} /></Link>}</div></div></section>
+    <div className="store-perks"><div className="store-container grid grid-cols-1 gap-4 py-5 sm:grid-cols-3"><p><ShieldCheck size={20} />Secure Razorpay checkout</p><p><Truck size={20} />{settings.freeShippingThresholdCents != null ? `Free delivery from ${money(settings.freeShippingThresholdCents, products[0]?.currency)}` : 'Delivery charges shown upfront'}</p><p><PackageCheck size={20} />Live product availability</p></div></div>
+    <section id="collections" className="store-container store-section"><div className="section-heading"><div><p className="store-eyebrow">Follow your curiosity</p><h2>A little of what you love.</h2></div><Link href="/store/products" className="store-text-link">Shop everything <ArrowUpRight size={17} /></Link></div>{categories.length ? <div className="category-grid">{categories.map((category) => { const group = products.filter((p) => p.category === category); const image = group.find((p) => p.imageUrl)?.imageUrl; return <Link key={category} href={`/store/products?category=${encodeURIComponent(category)}`} className="category-card"><ProductImage src={image} alt={category} className="category-image" /><div className="category-card-text"><span className="store-eyebrow">{group.length} find{group.length === 1 ? '' : 's'}</span><h3>{category}</h3><span className="category-cta">Explore now <ArrowUpRight size={14} /></span></div></Link>; })}</div> : <div className="store-empty"><h3>Something good is on its way.</h3><p>Our collection will appear here as products become available.</p></div>}</section>
+    <ProductSection title="The crowd favourites." eyebrow="Best sellers · from paid orders" products={best} href="/store/products?sort=best" />
+    <ProductSection title="Picked with you in mind." eyebrow="The featured edit" products={products.filter((p) => p.featured)} href="/store/products?featured=1" />
+    <OffersBanner />
+    <ProductSection title="Fresh finds, just landed." eyebrow="New to the collection" products={[...products].sort((a,b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))} href="/store/products?sort=new" />
+    {reviews.length > 0 && <section className="review-section"><div className="store-container store-section"><div className="section-heading"><div><p className="store-eyebrow">From our community</p><h2>Good things, in their words.</h2></div><span className="text-sm text-muted-foreground">Verified purchases</span></div><div className="grid gap-6 md:grid-cols-3">{reviews.slice(0, 3).map((r) => <article key={r.id} className="review-card"><div className="flex gap-1" aria-label={`${r.rating} out of 5 stars`}>{Array.from({length: r.rating}, (_,i) => <Star key={i} size={15} fill="currentColor" />)}</div><blockquote className="my-5 text-lg leading-relaxed">“{r.body}”</blockquote><p className="text-sm font-medium">{r.displayName}</p><Link href={`/store/products/${r.productId}`} className="mt-1 block text-xs text-muted-foreground">{products.find((p) => p.id === r.productId)?.name} · Verified purchase</Link></article>)}</div></div></section>}
+    <section id="delivery" className="store-container store-section"><div className="delivery-section"><div><p className="store-eyebrow">From our store to your door</p><h2>Let’s make it easy.</h2></div><div><p className="leading-relaxed text-muted-foreground">{settings.deliveryNote}</p>{settings.pickupEnabled && <p className="mt-3">Prefer to stop by? Choose pickup at checkout.{settings.address && ` Find us at ${settings.address}.`}</p>}<a href="#contact" className="store-text-link mt-5">Get in touch <ArrowUpRight size={17} /></a></div></div></section>
+    <section id="faq" className="store-container store-section !pt-0"><div className="delivery-section"><div><p className="store-eyebrow">Good to know</p><h2>A few helpful answers.</h2></div><div>{faq.map((f) => <details key={f.question} className="store-faq"><summary>{f.question}<span aria-hidden>+</span></summary><p>{f.answer}</p></details>)}<Link href="/legal/refund-policy" className="store-text-link mt-5">Read our refund policy <ArrowUpRight size={16} /></Link></div></div></section>
+  </>;
+}

@@ -1,0 +1,21 @@
+'use client';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { Search, SlidersHorizontal, X } from 'lucide-react';
+import { useStore, StoreLoading } from './store-provider';
+import { ProductCard } from './product-card';
+import { useStoreHref } from './store-link';
+import { isOnSale, price } from '@/lib/storefront';
+export function Catalog() {
+  const { store } = useStore();
+  const storeHref = useStoreHref();
+  const search = useSearchParams();
+  const router = useRouter();
+  const query = search.get('q') ?? '';
+  const category = search.get('category') ?? '';
+  const sort = search.get('sort') ?? 'new';
+  function update(name: string, value: string) { const params = new URLSearchParams(search.toString()); if (value) params.set(name,value); else params.delete(name); router.replace(`/store/products?${params}`, { scroll: false }); }
+  if (!store) return <StoreLoading />;
+  const products = store.products.filter((p) => (!query || `${p.name} ${p.description ?? ''} ${p.category}`.toLowerCase().includes(query.toLowerCase())) && (!category || p.category === category) && (!search.has('sale') || isOnSale(p)) && (!search.has('featured') || p.featured) && (!search.has('stock') || p.stock > 0) && (sort !== 'best' || p.sold > 0)).sort((a,b) => sort === 'price-low' ? price(a).current - price(b).current : sort === 'price-high' ? price(b).current - price(a).current : sort === 'best' ? b.sold - a.sold : Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+  const filters = !!category || search.has('sale') || search.has('featured') || search.has('stock') || !!query;
+  return <div className="store-container store-section"><p className="store-eyebrow">Find your everyday favourite</p><h1 className="store-page-title">{category || (sort === 'best' ? 'Best sellers' : search.has('featured') ? 'The featured edit' : search.has('sale') ? 'The sale collection' : 'The whole collection.')}</h1><div className="catalog-toolbar"><label className="catalog-search"><Search size={19} /><input autoFocus={search.has('search')} aria-label="Search products" placeholder="Search for something good…" value={query} onChange={(e) => update('q',e.target.value)} /></label><label className="flex items-center gap-3 text-sm"><SlidersHorizontal size={17} /><span className="sr-only">Sort products</span><select className="store-input" value={sort} onChange={(e) => update('sort',e.target.value)}><option value="new">Newest arrivals</option><option value="best">Best sellers</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option></select></label></div><div className="mb-7 flex flex-wrap items-center gap-4"><label className="text-sm"><span className="sr-only">Category</span><select className="store-input" value={category} onChange={(e) => update('category',e.target.value)}><option value="">All categories</option>{[...new Set(store.products.map((p) => p.category))].map((c) => <option key={c}>{c}</option>)}</select></label>{[{key:'stock', label:'In stock'}, {key:'sale',label:'On sale'}, {key:'featured',label:'Featured'}].map((filter) => <label key={filter.key} className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={search.has(filter.key)} onChange={(e) => update(filter.key,e.target.checked ? '1' : '')} />{filter.label}</label>)}{filters && <button className="store-text-link text-sm" onClick={() => router.replace(storeHref('/store/products'), { scroll: false })}><X size={14} />Clear filters</button>}<p className="ml-auto text-sm text-muted-foreground" aria-live="polite">{products.length} {products.length === 1 ? 'find' : 'finds'}</p></div>{products.length > 0 ? <div className="product-grid">{products.map((p) => <ProductCard key={p.id} product={p} />)}</div> : <div className="store-empty"><Search size={32} /><h2>{sort === 'best' && !filters ? 'Favourites in the making.' : 'No finds just yet.'}</h2><p>{sort === 'best' && !filters ? 'Best sellers will appear as customers place paid orders.' : 'Try a different search or clear your filters.'}</p><button className="store-button secondary" onClick={() => router.replace(storeHref('/store/products'))}>Browse all products</button></div>}</div>;
+}

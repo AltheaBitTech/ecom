@@ -1,0 +1,646 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Supabase's pooled (pgbouncer) connection — required at runtime since serverless
+  // functions open many short-lived connections. directUrl below bypasses the pooler
+  // for migrations, which pgbouncer's transaction mode doesn't support.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenant
+// ---------------------------------------------------------------------------
+
+enum TenantStatus {
+  PENDING_VERIFICATION
+  PROFILE_INCOMPLETE
+  UNDER_REVIEW
+  REVISION_REQUESTED
+  APPROVED
+  REJECTED
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+model Tenant {
+  id        String       @id @default(uuid())
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(PENDING_VERIFICATION)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  // India GST registration, captured at/after signup — nullable since a tenant can be
+  // ACTIVE before completing tax registration (enforced in application code, not the schema).
+  gstin          String?
+  legalName      String?
+  pan            String?
+  billingAddress Json?
+  // Home state for GST place-of-supply: CGST+SGST when it matches the shipping
+  // state, IGST otherwise. Nullable — falls back to a flat "GST" line on invoices
+  // until both this and the order's shipping state are known.
+  state          String?
+  // HTTPS URL to a hosted image, same pattern as storefront.heroImage — no upload/storage
+  // service in this codebase, so tenants point at an image they host elsewhere.
+  logoUrl        String?
+
+  users           User[]
+  notifications   Notification[]
+  campaigns       Campaign[]
+  roles           Role[]
+  auditLogs       AuditLog[]
+  products        Product[]
+  productVariants ProductVariant[]
+  inventoryItems  InventoryItem[]
+  customers       Customer[]
+  orders          Order[]
+  payments        Payment[]
+  storefront      Json             @default("{}")
+  coupons         Coupon[]
+  reviews         Review[]
+  invoices        Invoice[]
+
+  subscription   Subscription?
+  referralCode   ReferralCode?
+  referredBy     Referral?       @relation("RefereeTenant")
+  returnRequests ReturnRequest[]
+
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+// How this user proves who they are. A user is locked to exactly one — see
+// AuthService.socialLogin for why (prevents one email being hijacked via a second provider).
+enum AuthProvider {
+  PASSWORD
+  GOOGLE
+  FACEBOOK
+  MICROSOFT
+  TWITTER
+}
+
+model User {
+  id           String       @id @default(uuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email        String
+  passwordHash String?
+  authProvider AuthProvider @default(PASSWORD)
+  status       UserStatus   @default(ACTIVE)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  // Opt-out for the email/WhatsApp copy of admin alerts. In-app notifications are always
+  // delivered — they cost the user nothing until they open the bell.
+  emailNotifications Boolean @default(true)
+
+  roles         UserRole[]
+  refreshTokens RefreshToken[]
+  notifications Notification[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+// An admin-facing alert shown in the dashboard's notification bell. One row per recipient
+// (not per event), so read state is per-user without a join table.
+model Notification {
+  id        String    @id @default(uuid())
+  tenantId  String
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  // In-app deep link to whatever the notification is about, e.g. /admin/orders/<id>.
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([tenantId])
+}
+
+// A Role holds a flat list of permission strings, e.g. "catalog.products.create.tenant".
+// Custom roles (isSystem = false) are created by tenant owners/admins and are bounded
+// at creation time to a subset of the creator's own permissions (enforced in RolesService,
+// not in the schema).
+model Role {
+  id          String    @id @default(uuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  isSystem    Boolean   @default(false)
+  permissions String[]
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  users UserRole[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model UserRole {
+  id     String @id @default(uuid())
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+}
+
+// Refresh tokens are stored hashed (never plaintext) and rotated on every use.
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Catalog & inventory
+// ---------------------------------------------------------------------------
+
+model Product {
+  id             String    @id @default(uuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sku            String
+  name           String
+  description    String?
+  imageUrl       String?
+  images         String[]  @default([])
+  videos         String[]  @default([])
+  labels         String[]  @default([])
+  category       String    @default("Other")
+  featured       Boolean   @default(false)
+  compareAtCents Int?
+  priceCents     Int
+  currency       String    @default("INR")
+  // India GST: rate in basis points (1800 = 18%) and the HSN code it's filed under.
+  // 0 is a valid rate (exempt goods) — nullable HSN since not every tenant is registered yet.
+  gstRateBps     Int       @default(0)
+  hsnCode        String?
+  publishedAt    DateTime?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  inventory  InventoryItem?
+  orderItems OrderItem[]
+  variants   ProductVariant[]
+  reviews    Review[]
+
+  @@unique([tenantId, sku])
+  @@index([tenantId])
+}
+
+// A product's sellable options — label is free text ("Half"/"Full", "250 Gram"/"500 Gram", any
+// future axis) rather than a fixed weight/size enum, so one mechanism covers every product type.
+// A product with no variant rows just sells at its own priceCents, unchanged.
+model ProductVariant {
+  id             String    @id @default(uuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  label          String
+  priceCents     Int
+  compareAtCents Int?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  orderItems OrderItem[]
+
+  @@index([tenantId, productId])
+}
+
+// One row per product (single-warehouse MVP — see ponytail note in inventory.service.ts).
+model InventoryItem {
+  id               String   @id @default(uuid())
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId        String   @unique
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantityOnHand   Int      @default(0)
+  reorderThreshold Int      @default(0)
+  updatedAt        DateTime @updatedAt
+
+  @@index([tenantId])
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  FULFILLED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  email     String?
+  phone     String?
+  createdAt DateTime @default(now())
+
+  // Marketing consent. Defaults to false and is only ever set by the shopper ticking the box at
+  // checkout — never by an admin, and never backfilled for customers who predate it. A campaign
+  // reaching someone who did not ask for it is the one failure mode this feature must not have.
+  marketingOptIn Boolean   @default(false)
+  unsubscribedAt DateTime?
+
+  orders Order[]
+
+  @@index([tenantId])
+}
+
+enum CampaignStatus {
+  SENDING
+  SENT
+  FAILED
+}
+
+// A record of one broadcast: what was said, to whom, over which channels, and how it landed.
+// Kept so a merchant can see what marketing already went out, and so a complaint can be traced.
+model Campaign {
+  id             String         @id @default(uuid())
+  tenantId       String
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subject        String
+  body           String
+  channels       String[]
+  audience       String
+  recipientCount Int            @default(0)
+  sentCount      Int            @default(0)
+  failedCount    Int            @default(0)
+  status         CampaignStatus @default(SENDING)
+  createdByEmail String?
+  createdAt      DateTime       @default(now())
+  completedAt    DateTime?
+
+  @@index([tenantId])
+}
+
+model Order {
+  id             String      @id @default(uuid())
+  tenantId       String
+  tenant         Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer    @relation(fields: [customerId], references: [id])
+  status         OrderStatus @default(PENDING)
+  totalCents     Int
+  subtotalCents  Int         @default(0)
+  discountCents  Int         @default(0)
+  shippingCents  Int         @default(0)
+  taxCents       Int         @default(0)
+  couponCode     String?
+  delivery       Json?
+  // Set when the order ships — manually today, or by a courier API integration later.
+  trackingNumber String?
+  courierName    String?
+  reviews        Review[]
+  currency       String      @default("INR")
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  items   OrderItem[]
+  payment Payment?
+  events  OrderEvent[]
+  invoice Invoice?
+  returns ReturnRequest[]
+
+  @@index([tenantId, status])
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  REFUNDED
+}
+
+// Customer-initiated return/refund request against a fulfilled order.
+model ReturnRequest {
+  id          String       @id @default(uuid())
+  tenantId    String
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId     String
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reason      String
+  status      ReturnStatus @default(REQUESTED)
+  refundCents Int?
+  adminNote   String?
+  createdAt   DateTime     @default(now())
+  resolvedAt  DateTime?
+
+  @@index([tenantId, status])
+  @@index([orderId])
+}
+
+// Timeline of status changes for the animated order-tracking UI — appended to, never edited.
+model OrderEvent {
+  id        String      @id @default(uuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model OrderItem {
+  id             String          @id @default(uuid())
+  orderId        String
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product         @relation(fields: [productId], references: [id])
+  variantId      String?
+  variant        ProductVariant? @relation(fields: [variantId], references: [id])
+  variantLabel   String?
+  quantity       Int
+  unitPriceCents Int
+  lineTotalCents Int
+
+  @@index([orderId])
+}
+
+model Coupon {
+  id                   String   @id @default(uuid())
+  tenantId             String
+  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code                 String
+  title                String
+  description          String   @default("")
+  kind                 String
+  value                Int
+  minimumCents         Int      @default(0)
+  maximumDiscountCents Int?
+  startsAt             DateTime
+  endsAt               DateTime
+  active               Boolean  @default(true)
+  maxRedemptions       Int?
+  perCustomerLimit     Int?
+  createdAt            DateTime @default(now())
+
+  @@unique([tenantId, code])
+  @@index([tenantId, active, endsAt])
+}
+
+model Review {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  displayName String
+  rating      Int
+  body        String
+  published   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@unique([orderId, productId])
+  @@index([tenantId, published, createdAt])
+}
+
+// One row per order — Razorpay is the only provider today (see PaymentsService).
+model Payment {
+  id                String        @id @default(uuid())
+  tenantId          String
+  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId           String        @unique
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider          String        @default("razorpay")
+  providerOrderId   String        @unique
+  providerPaymentId String?
+  status            PaymentStatus @default(PENDING)
+  amountCents       Int
+  currency          String        @default("INR")
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([tenantId])
+}
+
+// ---------------------------------------------------------------------------
+// Billing (platform subscriptions — a Tenant pays us, not a storefront order)
+// ---------------------------------------------------------------------------
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+model Plan {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  priceCents   Int
+  currency     String   @default("INR")
+  intervalDays Int      @default(30)
+  features     String[] @default([])
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                     String             @id @default(uuid())
+  tenantId               String             @unique
+  tenant                 Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  planId                 String
+  plan                   Plan               @relation(fields: [planId], references: [id])
+  status                 SubscriptionStatus @default(TRIALING)
+  razorpaySubscriptionId String?            @unique
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  payments SubscriptionPayment[]
+
+  @@index([status])
+}
+
+// One row per billing-cycle charge — the ledger referral commissions and invoices read from.
+model SubscriptionPayment {
+  id                String        @id @default(uuid())
+  subscriptionId    String
+  subscription      Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  providerPaymentId String?       @unique
+  amountCents       Int
+  currency          String        @default("INR")
+  status            PaymentStatus @default(PENDING)
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+
+  referralCommission ReferralCommission?
+  invoice            Invoice?
+
+  @@index([subscriptionId])
+}
+
+// ---------------------------------------------------------------------------
+// Referral program (a Tenant refers other Tenants to sign up and subscribe)
+// ---------------------------------------------------------------------------
+
+enum ReferralStatus {
+  PENDING
+  ACTIVE
+  ENDED
+}
+
+enum CommissionStatus {
+  PENDING
+  PAID
+}
+
+model ReferralCode {
+  id            String   @id @default(uuid())
+  tenantId      String   @unique
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code          String   @unique
+  // Basis points (1000 = 10%) this referrer earns. Null = platform default rate;
+  // set by a platform admin for VIP overrides (e.g. 2000 = 20%).
+  commissionBps Int?
+  // UPI VPA the referrer wants commission payouts sent to. Set by the tenant themselves;
+  // required only if they want automatic RazorpayX payout instead of manual settlement.
+  payoutVpa     String?
+  createdAt     DateTime @default(now())
+
+  referrals Referral[]
+}
+
+model Referral {
+  id              String         @id @default(uuid())
+  referralCodeId  String
+  referralCode    ReferralCode   @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
+  refereeTenantId String         @unique
+  refereeTenant   Tenant         @relation("RefereeTenant", fields: [refereeTenantId], references: [id], onDelete: Cascade)
+  status          ReferralStatus @default(PENDING)
+  createdAt       DateTime       @default(now())
+
+  commissions ReferralCommission[]
+
+  @@index([referralCodeId])
+}
+
+// One row per subscription payment the referral earned a cut of — paid out once the
+// referee's payment actually clears, never speculatively.
+model ReferralCommission {
+  id                    String              @id @default(uuid())
+  referralId            String
+  referral              Referral            @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  subscriptionPaymentId String              @unique
+  subscriptionPayment   SubscriptionPayment @relation(fields: [subscriptionPaymentId], references: [id], onDelete: Cascade)
+  rateBps               Int
+  amountCents           Int
+  status                CommissionStatus    @default(PENDING)
+  // Set only when payout actually happened via RazorpayX (POST /payouts). Null + PAID means
+  // it was settled manually outside the system (no VPA on file, or RazorpayX unconfigured).
+  payoutId              String?
+  paidAt                DateTime?
+  createdAt             DateTime            @default(now())
+
+  @@index([referralId])
+}
+
+// ---------------------------------------------------------------------------
+// Invoicing (storefront orders and platform subscription charges both invoice here)
+// ---------------------------------------------------------------------------
+
+model Invoice {
+  id                    String               @id @default(uuid())
+  tenantId              String
+  tenant                Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId               String?              @unique
+  order                 Order?               @relation(fields: [orderId], references: [id])
+  subscriptionPaymentId String?              @unique
+  subscriptionPayment   SubscriptionPayment? @relation(fields: [subscriptionPaymentId], references: [id])
+  number                String               @unique
+  billedToName          String
+  billedToGstin         String?
+  subtotalCents         Int
+  taxCents              Int                  @default(0)
+  shippingCents         Int                  @default(0)
+  totalCents            Int
+  currency              String               @default("INR")
+  issuedAt              DateTime             @default(now())
+
+  @@index([tenantId])
+}
+
+// ---------------------------------------------------------------------------
+// Platform (cross-tenant super-admin, not a tenant User — see platform.module.ts)
+// ---------------------------------------------------------------------------
+
+model PlatformAdmin {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+// Immutable audit trail. Never updated or deleted by application code.
+model AuditLog {
+  id            String   @id @default(uuid())
+  tenantId      String?
+  tenant        Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  actorId       String?
+  actorEmail    String?
+  action        String
+  resourceType  String
+  resourceId    String?
+  previousValue Json?
+  newValue      Json?
+  ip            String?
+  userAgent     String?
+  success       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([action])
+}
