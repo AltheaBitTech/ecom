@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Prefer TF_VAR_* env vars for secrets in CI.
+vercel_team    = "altheabittech"
+project_prefix = "ecom"
+store_name     = "My Store"
+
+database_url        = "postgresql://...pooler...?pgbouncer=true"
+direct_url          = "postgresql://...direct..."
+jwt_access_secret   = "" # openssl rand -base64 48
+jwt_refresh_secret  = "" # openssl rand -base64 48
+platform_jwt_secret = "" # openssl rand -base64 48
+
+extra_secrets = {
+  # RAZORPAY_KEY_ID         = ""
+  # RAZORPAY_KEY_SECRET     = ""
+  # RAZORPAY_WEBHOOK_SECRET = ""
+  # RESEND_API_KEY          = ""
+}
