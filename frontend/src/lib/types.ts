@@ -1,324 +1,275 @@
-export type TenantStatus = 'PENDING_VERIFICATION' | 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED' | 'REJECTED';
-export type UserStatus = 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED';
-
-export interface Tenant {
+export interface Product {
   id: string;
+  tenant_id: string;
   name: string;
   slug: string;
-  status: TenantStatus;
-  gstin?: string | null;
-  legalName?: string | null;
-  pan?: string | null;
-  billingAddress?: Record<string, unknown> | null;
-  logoUrl?: string | null;
-  state?: string | null;
-}
-
-export interface User {
-  id: string;
-  email: string;
-  status: UserStatus;
-  createdAt: string;
-  roles: { role: { id: string; name: string } }[];
-}
-
-export interface AuthUser extends User {
-  permissions: string[];
-}
-
-// A product's sellable options — label is free text ("Half"/"Full", "70 Gram"/"1 Kg", anything),
-// not a fixed weight/size field, so one mechanism covers every product type.
-export interface ProductVariant {
-  id: string;
-  label: string;
-  priceCents: number;
-  compareAtCents?: number | null;
-}
-
-export interface Product {
-  category: string;
-  featured: boolean;
-  images: string[];
-  videos: string[];
-  labels: string[];
-  compareAtCents: number | null;
-  id: string;
-  sku: string;
-  name: string;
   description: string | null;
-  imageUrl: string | null;
-  priceCents: number;
+  status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+  price_cents: number;
   currency: string;
-  publishedAt: string | null;
-  archivedAt: string | null;
-  variants: ProductVariant[];
-  gstRateBps: number;
-  hsnCode: string | null;
-}
-
-/** Public, unauthenticated shape returned by GET /storefront/products — no draft/archive fields. */
-export interface StorefrontProduct {
   stock: number;
-  sold: number;
-  publishedAt: string;
-  category: string;
-  featured: boolean;
+  compare_at_price_cents: number | null;
+  is_featured: boolean;
+  is_bestseller: boolean;
+  badge: string | null;
   images: string[];
-  videos: string[];
-  labels: string[];
-  compareAtCents: number | null;
+  custom_attributes: Record<string, unknown>;
+  category_id: string | null;
+}
+
+export interface ActiveFlashSale {
+  product_id: string;
+  sale_price_cents: number;
+  ends_at: string;
+}
+
+export interface Category {
   id: string;
-  sku: string;
+  tenant_id: string;
   name: string;
+  slug: string;
+  parent_id: string | null;
+  position: number;
   description: string | null;
-  imageUrl: string | null;
-  priceCents: number;
+  image_url: string | null;
+  is_featured: boolean;
+}
+
+/** Payload the admin product form sends to the create/update actions. */
+export interface ProductInput {
+  name: string;
+  slug: string;
+  description?: string;
+  price_cents: number;
+  currency?: string;
+  stock?: number;
+  compare_at_price_cents?: number | null;
+  is_featured?: boolean;
+  is_bestseller?: boolean;
+  badge?: string | null;
+  images?: string[];
+  custom_attributes?: Record<string, unknown>;
+  category_id?: string | null;
+  status?: 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+}
+
+export interface CategoryInput {
+  name: string;
+  slug: string;
+  parent_id?: string;
+  position?: number;
+  description?: string;
+  image_url?: string;
+  is_featured?: boolean;
+}
+
+export interface StoreConfig {
+  tenant_id: string;
+  store_name: string;
   currency: string;
-  variants: ProductVariant[];
+  locale: string;
+  theme: StoreTheme;
+  product_attribute_schema: Record<string, unknown>;
+  custom_domain: string | null;
+  custom_domain_verified: boolean;
+  preview?: boolean;
 }
 
-export interface Role {
+export interface LegacyStoreTheme {
+  template?: import('./store-templates').StoreTemplateId;
+  colors?: { primary?: string; primaryForeground?: string; background?: string; accent?: string };
+  content?: { heroTitle?: string; heroAccent?: string; announcement?: string; tagline?: string };
+  logoUrl?: string | null;
+  font?: string;
+}
+export type StoreTheme = import('./store-templates').StoreDesignConfig | LegacyStoreTheme;
+
+export interface StoreDesignState {
+  draft: import('./store-templates').StoreDesignConfig;
+  published: import('./store-templates').StoreDesignConfig;
+  draft_revision: number;
+  published_revision: number;
+  published_at: string | null;
+}
+
+export interface MediaAsset {
   id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  alt_text: string | null;
+  width: number | null;
+  height: number | null;
+  status: 'UPLOADING' | 'READY' | 'ARCHIVED';
+  created_at: string;
+  url: string | null;
+}
+
+export interface Entitlements {
+  planKey: string;
+  planName: string;
+  features: Record<string, boolean>;
+  limits: Record<string, number>;
+}
+
+export type FlashSaleStatus = 'upcoming' | 'ongoing' | 'expired';
+
+export interface FlashSale {
+  id: string;
+  product_id: string;
+  product_name: string;
+  product_price_cents: number;
+  stock: number;
+  currency: string;
+  sale_price_cents: number;
+  starts_at: string;
+  ends_at: string;
+  status: FlashSaleStatus;
+}
+
+export interface FlashSaleInput {
+  product_id: string;
+  sale_price_cents: number;
+  starts_at: string;
+  ends_at: string;
+}
+
+export interface Page<T> {
+  data: T[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+// --- Cart & checkout ---------------------------------------------------------
+
+/**
+ * A cart line as held in the browser (localStorage). Carries just enough to
+ * render the cart offline; every price shown at checkout is re-quoted from the
+ * backend, which is the sole authority on price and availability.
+ */
+export interface CartItem {
+  product_id: string;
   name: string;
-  description?: string | null;
-  permissions: string[];
-  isSystem: boolean;
-  archivedAt?: string | null;
-}
-
-export type OrderStatus = 'PENDING' | 'CONFIRMED' | 'SHIPPED' | 'FULFILLED' | 'CANCELLED';
-export type PaymentStatus = 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED';
-
-export interface Customer {
-  id: string;
-  name: string;
-  email: string | null;
-  phone: string | null;
-  createdAt: string;
-  marketingOptIn?: boolean;
-  unsubscribedAt?: string | null;
-}
-
-export interface OrderItem {
-  id: string;
-  productId: string;
-  variantId: string | null;
-  variantLabel: string | null;
+  price_cents: number;
+  currency: string;
+  image: string | null;
   quantity: number;
-  unitPriceCents: number;
-  lineTotalCents: number;
-  product: { id: string; name: string; sku: string };
+  /** Display-only chosen weight/size (e.g. "1kg"). Does not affect pricing —
+   *  the backend prices by product_id. ponytail: per-variant price/stock needs
+   *  a backend variant model. */
+  variant?: string;
 }
 
-export interface Payment {
-  id: string;
-  provider: string;
-  status: PaymentStatus;
+export interface PricedLine {
+  product_id: string;
+  name: string;
+  price_cents: number;
+  quantity: number;
+  line_total_cents: number;
+}
+
+export interface CartQuote {
+  currency: string;
+  lines: PricedLine[];
+  subtotal_cents: number;
+  shipping_cents: number;
+  total_cents: number;
+}
+
+export interface ShippingRate {
+  service: string;
+  label: string;
+  carrier: string;
   amountCents: number;
   currency: string;
 }
 
-export interface OrderEvent {
-  id: string;
-  status: OrderStatus;
-  note: string | null;
-  createdAt: string;
+export interface ShippingAddress {
+  name: string;
+  line1: string;
+  line2?: string;
+  city: string;
+  state?: string;
+  postal_code: string;
+  country: string;
+  phone?: string;
 }
 
-export interface Invoice {
-  id: string;
-  number: string;
-  billedToName: string;
-  billedToGstin: string | null;
-  subtotalCents: number;
-  taxCents: number;
-  shippingCents: number;
-  totalCents: number;
-  currency: string;
-  issuedAt: string;
-}
+export type OrderStatus = 'PENDING' | 'PAID' | 'FULFILLED' | 'CANCELLED' | 'REFUNDED';
 
-export type ReturnStatus = 'REQUESTED' | 'APPROVED' | 'REJECTED' | 'REFUNDED';
-export interface ReturnRequest {
-  id: string;
-  orderId: string;
-  reason: string;
-  status: ReturnStatus;
-  refundCents: number | null;
-  adminNote: string | null;
-  createdAt: string;
-  resolvedAt: string | null;
-  order?: { customer: Customer };
+export interface OrderItem {
+  product_id: string | null;
+  name: string;
+  price_cents: number;
+  quantity: number;
 }
 
 export interface Order {
   id: string;
+  number: string;
   status: OrderStatus;
-  totalCents: number;
-  subtotalCents: number;
-  discountCents: number;
-  shippingCents: number;
-  taxCents: number;
+  customer_id: string | null;
+  guest_email: string | null;
+  subtotal_cents: number;
+  shipping_cents: number;
+  total_cents: number;
   currency: string;
-  createdAt: string;
-  customer: Customer;
+  shipping_address: ShippingAddress | null;
   items: OrderItem[];
-  payment: Payment | null;
-  events: OrderEvent[];
-  invoice: Invoice | null;
-  trackingNumber: string | null;
-  courierName: string | null;
-  returns: ReturnRequest[];
+  created_at: string;
 }
 
-export interface InventoryItem {
-  id: string;
-  productId: string;
-  quantityOnHand: number;
-  reorderThreshold: number;
-  product: { id: string; name: string; sku: string };
-}
-
-export interface AuthSession {
-  accessToken: string;
-  tenant: Tenant;
-  user: AuthUser;
-}
-
-export interface StoreSettings {
-  headline: string; tagline: string; description: string; heroImage: string; announcement: string;
-  supportEmail: string; phone: string; address: string; deliveryNote: string;
-  shippingCents: number; freeShippingThresholdCents: number | null; pickupEnabled: boolean;
-  faq: { question: string; answer: string }[];
-}
-export interface Offer {
-  id: string; code: string; title: string; description: string; kind: 'percent' | 'fixed'; value: number;
-  minimumCents: number; maximumDiscountCents: number | null; startsAt: string; endsAt: string; active: boolean;
-  maxRedemptions: number | null; perCustomerLimit: number | null;
-}
-export interface Review {
-  id: string; productId: string; displayName: string; rating: number; body: string; createdAt: string;
-  published?: boolean; product?: { name: string };
-}
-export interface StoreData {
-  id: string; name: string; settings: StoreSettings; products: StorefrontProduct[]; offers: Offer[]; reviews: Review[];
-}
-export interface CartQuote {
-  items: { productId: string; variantId?: string; quantity: number; unitPriceCents: number; lineTotalCents: number }[];
-  subtotalCents: number; discountCents: number; shippingCents: number; taxCents: number; totalCents: number; currency: string;
-  couponCode: string | null; remainingForFreeShippingCents: number | null;
-}
-export interface Plan {
-  id: string;
-  name: string;
-  priceCents: number;
+export interface PaymentIntent {
+  provider: string;
+  public_key: string | null;
+  provider_order_id: string;
+  amount_cents: number;
   currency: string;
-  intervalDays: number;
-  features: string[];
-  active: boolean;
-}
-export type SubscriptionStatus = 'TRIALING' | 'ACTIVE' | 'PAST_DUE' | 'CANCELLED';
-export interface SubscriptionPayment {
-  id: string;
-  amountCents: number;
-  currency: string;
-  status: PaymentStatus;
-  paidAt: string | null;
-  createdAt: string;
-}
-export interface Subscription {
-  id: string;
-  status: SubscriptionStatus;
-  currentPeriodEnd: string | null;
-  cancelAtPeriodEnd: boolean;
-  plan: Plan;
-  payments: SubscriptionPayment[];
-}
-export type ReferralStatus = 'PENDING' | 'ACTIVE' | 'ENDED';
-export type CommissionStatus = 'PENDING' | 'PAID';
-export interface ReferralCommission {
-  id: string;
-  rateBps: number;
-  amountCents: number;
-  status: CommissionStatus;
-  paidAt: string | null;
-}
-export interface ReferralSummary {
-  code: string;
-  commissionBps: number;
-  payoutVpa: string | null;
-  referrals: {
-    id: string;
-    status: ReferralStatus;
-    createdAt: string;
-    refereeTenant: { id: string; name: string };
-    commissions: ReferralCommission[];
-  }[];
-  totalEarnedCents: number;
-  totalPaidCents: number;
+  order_id: string;
+  requires_gateway: boolean;
 }
 
-export type CampaignChannel = 'email' | 'sms' | 'whatsapp';
-export type CampaignAudience = 'all' | 'buyers' | 'prospects' | 'selected';
-export interface Campaign {
-  id: string;
-  subject: string;
-  body: string;
-  channels: CampaignChannel[];
-  audience: CampaignAudience;
-  recipientCount: number;
-  sentCount: number;
-  failedCount: number;
-  status: 'SENDING' | 'SENT' | 'FAILED';
-  createdByEmail: string | null;
-  createdAt: string;
-  completedAt: string | null;
-}
-export interface AudiencePreview {
-  recipients: number;
-  unreachable: number;
-  optedIn: number;
-  totalCustomers: number;
+// --- Shopper account ---------------------------------------------------------
+
+export interface CustomerTokens {
+  access_token: string;
+  expires_in: number;
+  customer: { id: string; email: string; tenant_id: string; email_verified: boolean };
 }
 
-export interface AppNotification {
+export interface Profile {
   id: string;
-  title: string;
-  body: string;
-  link: string | null;
-  readAt: string | null;
-  createdAt: string;
+  email: string;
+  name: string | null;
+  phone: string | null;
+  email_verified: boolean;
+  status: string;
+  created_at: string;
 }
 
-export interface TrendPoint {
-  current: number;
-  previous: number;
-  /** null when the previous window was empty — no honest percentage exists. */
-  changePct: number | null;
-}
-export interface ActivityItem {
-  kind: 'order' | 'customer' | 'review';
+export interface Address {
   id: string;
-  at: string;
-  title: string;
-  detail: string;
-  link: string;
+  label: string | null;
+  full_name: string;
+  phone: string | null;
+  line1: string;
+  line2: string | null;
+  city: string;
+  state: string | null;
+  postal_code: string;
+  country: string;
+  is_default: boolean;
 }
 
-export interface Analytics {
-  revenueCents: number; orderCount: number; avgOrderValueCents: number;
-  daily: { date: string; revenueCents: number; orders: number; customers: number }[];
-  trend: { revenue: TrendPoint; orders: TrendPoint; customers: TrendPoint; avgOrderValue: TrendPoint };
-  customerSegments: { repeat: number; single: number; neverOrdered: number };
-  salesByRegion: { region: string; revenueCents: number; orders: number }[];
-  activity: ActivityItem[];
-  ordersByStatus: Partial<Record<OrderStatus, number>>;
-  topProducts: { productId: string; name: string; revenueCents: number; quantity: number }[];
-  productCount: number; lowStock: number; outOfStock: number;
-  customerCount: number; newCustomers: number;
-  reviewCount: number; pendingReviews: number; avgRating: number | null;
-  setup: {
-    publishedCount: number; sellableCount: number; withoutImages: number;
-    contactSet: boolean; deliverySet: boolean; activeOffers: number;
-  };
+export interface AddressInput {
+  label?: string;
+  full_name: string;
+  phone?: string;
+  line1: string;
+  line2?: string;
+  city: string;
+  state?: string;
+  postal_code: string;
+  country: string;
+  is_default?: boolean;
 }

@@ -1,54 +1,34 @@
 import type { Metadata } from 'next';
-import { Geist_Mono, Fraunces } from 'next/font/google';
-import { AuthProvider } from '@/lib/auth-context';
-import { ThemeProvider } from '@/components/theme-provider';
-import { Toaster } from '@/components/ui/sonner';
+import { Plus_Jakarta_Sans } from 'next/font/google';
+
 import './globals.css';
 
-const geistMono = Geist_Mono({
-  variable: '--font-geist-mono',
+// "Google Sans" itself is Google-proprietary — not distributed on Google
+// Fonts, so next/font can't load it. Plus Jakarta Sans is the closest
+// publicly-licensed match (same geometric-humanist shape Google Sans uses),
+// and one family for both body and display keeps every screen consistent
+// the way Google's own product UI does.
+const sans = Plus_Jakarta_Sans({ subsets: ['latin'], variable: '--font-sans' });
+const display = Plus_Jakarta_Sans({
   subsets: ['latin'],
-});
-
-// Editorial display serif — used only on the marketing landing page (font-display).
-const fraunces = Fraunces({
-  variable: '--font-fraunces',
-  weight: ['500', '600'],
-  style: ['normal', 'italic'],
-  subsets: ['latin'],
+  variable: '--font-display',
+  weight: ['500', '700', '800'],
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://altheabit.com'),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
   title: {
-    // Inferred from the domain altheabit.com — confirm the real store name with the business owner.
-    default: 'Althea Bit',
-    template: '%s · Althea Bit',
+    default: 'StoreLab — Understand and grow your online store',
+    template: '%s · StoreLab',
   },
-  description: 'Shop online at Althea Bit — quality products, secure checkout, and fast delivery.',
-  openGraph: {
-    title: 'Althea Bit',
-    description: 'Shop online at Althea Bit — quality products, secure checkout, and fast delivery.',
-    url: 'https://altheabit.com',
-    type: 'website',
-  },
+  description:
+    'Products, storefront design, payments, shipping, customers, and insights in one clear commerce workspace.',
 };
 
-export default function RootLayout({ children }: LayoutProps<'/'>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html
-      lang="en"
-      suppressHydrationWarning
-      className={`${geistMono.variable} ${fraunces.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col bg-background text-foreground">
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-          <AuthProvider>
-            {children}
-            <Toaster richColors position="top-right" />
-          </AuthProvider>
-        </ThemeProvider>
-      </body>
+    <html lang="en" className={`${sans.variable} ${display.variable}`} suppressHydrationWarning>
+      <body className="font-sans">{children}</body>
     </html>
   );
 }

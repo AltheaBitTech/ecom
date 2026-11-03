@@ -1,91 +1,58 @@
 import { INestApplication, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Prisma, PrismaClient } from '@prisma/client';
 
-// Models that carry a tenantId column and must never be queried across tenants.
-const TENANT_SCOPED_MODELS = new Set([
-  'User',
-  'Role',
-  'AuditLog',
-  'Product',
-  'ProductVariant',
-  'Coupon',
-  'Review',
-  'InventoryItem',
-  'Customer',
-  'Order',
-  'Payment',
-  'Invoice',
-  'Subscription',
-  'ReferralCode',
-  'ReturnRequest',
-  'Notification',
-  'Campaign',
-]);
-
 /**
- * Single chokepoint for tenant-scoped data access.
+ * The database gateway. Two entry points bound tenant access:
  *
- * `forTenant(tenantId)` returns a client extension that transparently injects
- * `tenantId` into every where-clause and create/update payload for tenant-scoped
- * models, so a service can never accidentally forget the filter. This is
- * application-level isolation.
+ *   forTenant(tenantId, cb) — runs `cb` inside a transaction with the
+ *     `app.current_tenant` GUC set transaction-locally. RLS then restricts every
+ *     query in the callback to that tenant. This is the ONLY sanctioned way to
+ *     read/write tenant-owned tables.
  *
- * ponytail: this is app-level isolation only, not Postgres RLS. It is correct as
- * long as every read/write for a tenant-scoped model goes through
- * `PrismaService.forTenant()` (enforced by convention + code review today, not
- * by the type system). Upgrade path if a stronger guarantee is needed: enable
- * RLS with `SET LOCAL app.tenant_id` per request transaction, so isolation holds
- * even if a future service bypasses this helper.
+ *   asPlatform(cb) — runs `cb` with `app.bypass_rls = on`, for the narrow set of
+ *     operations that legitimately cross tenants (provisioning a tenant whose row
+ *     does not yet exist, plan/seed maintenance). Every use is deliberate.
+ *
+ * `set_config(key, value, true)` scopes the setting to the current transaction,
+ * so context can never leak to the next request on a pooled connection.
  */
+export type Tx = Prisma.TransactionClient;
+
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
 
-  async onModuleInit() {
+  async onModuleInit(): Promise<void> {
     await this.$connect();
   }
 
-  async onModuleDestroy() {
+  async onModuleDestroy(): Promise<void> {
     await this.$disconnect();
   }
 
-  enableShutdownHooks(app: INestApplication) {
+  enableShutdownHooks(app: INestApplication): void {
     process.on('beforeExit', () => {
       void app.close();
     });
   }
 
-  forTenant(tenantId: string) {
+  /** Run a unit of work scoped to one tenant under row-level security. */
+  async forTenant<T>(tenantId: string, work: (tx: Tx) => Promise<T>): Promise<T> {
     if (!tenantId) {
-      throw new Error('forTenant() requires a tenantId');
+      // Defense in depth: never open a tenant transaction without a scope.
+      throw new Error('forTenant called without a tenantId');
     }
-    return this.$extends({
-      query: {
-        $allModels: {
-          async $allOperations({ model, operation, args, query }) {
-            if (!model || !TENANT_SCOPED_MODELS.has(model)) {
-              return query(args);
-            }
-            const a = args as Record<string, unknown>;
-            if (['create'].includes(operation)) {
-              a.data = { ...(a.data as object), tenantId };
-            } else if (['createMany'].includes(operation)) {
-              const dataArr = a.data as unknown[];
-              a.data = Array.isArray(dataArr) ? dataArr.map((d) => ({ ...(d as object), tenantId })) : dataArr;
-            } else if (
-              ['findUnique', 'findUniqueOrThrow', 'findFirst', 'findFirstOrThrow', 'findMany', 'update', 'updateMany', 'delete', 'deleteMany', 'count', 'aggregate'].includes(
-                operation,
-              )
-            ) {
-              a.where = { ...(a.where as object), tenantId };
-            }
-            return query(a as never);
-          },
-        },
-      },
-    }) as PrismaClient;
+    return this.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+      return work(tx);
+    });
+  }
+
+  /** Run a unit of work with RLS bypassed — cross-tenant, deliberate, audited. */
+  async asPlatform<T>(work: (tx: Tx) => Promise<T>): Promise<T> {
+    return this.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.bypass_rls', 'on', true)`;
+      return work(tx);
+    });
   }
 }
-
-export type TenantScopedPrisma = ReturnType<PrismaService['forTenant']>;
-export type { Prisma };

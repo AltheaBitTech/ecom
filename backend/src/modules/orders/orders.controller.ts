@@ -1,156 +1,112 @@
-import { Body, Controller, Get, Header, Param, Post, Query, Res } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { Response } from 'express';
-import { AuditService } from '../../common/auth/audit.service';
-import { CurrentUser } from '../../common/auth/current-user.decorator';
-import { Public } from '../../common/auth/public.decorator';
-import { RequirePermissions } from '../../common/auth/permissions.decorator';
-import type { AuthContext } from '../../common/auth/request-context';
-import { PERMISSIONS } from '../roles/permissions.catalog';
-import { InvoicesService } from '../invoices/invoices.service';
-import { CreateOrderDto } from './dto/create-order.dto';
-import { ListOrdersDto } from './dto/list-orders.dto';
-import { CancelOrderDto } from './dto/cancel-order.dto';
-import { ShipOrderDto } from './dto/ship-order.dto';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
+
+import { Auth, CurrentPrincipal, OptionalAuth, Public, RequirePermission } from '../../common/auth/decorators';
+import { isCustomer, isStaff, type Principal } from '../../common/auth/principal';
+import { AppException } from '../../common/errors/app-exception';
+
+import {
+  CheckoutDto,
+  ListOrdersQueryDto,
+  PreviewCartDto,
+  UpdateOrderStatusDto,
+} from './dto/orders.dto';
 import { OrdersService } from './orders.service';
 
-@ApiTags('orders')
-@Controller('orders')
-export class OrdersController {
-  constructor(
-    private readonly orders: OrdersService,
-    private readonly invoices: InvoicesService,
-    private readonly audit: AuditService,
-  ) {}
+/**
+ * Storefront checkout & order tracking. Checkout and preview are optional-auth:
+ * a shopper's customer token attributes the order, its absence means a guest.
+ * RLS scopes everything to the store.
+ */
+@ApiTags('storefront-orders')
+@Controller('storefront/:tenantId')
+export class StorefrontOrdersController {
+  constructor(private readonly orders: OrdersService) {}
+
+  @Post('cart/preview')
+  @Public()
+  @HttpCode(200)
+  preview(@Param('tenantId') tenantId: string, @Body() dto: PreviewCartDto) {
+    return this.orders.preview(tenantId, dto.items);
+  }
+
+  @Post('checkout')
+  @OptionalAuth('customer')
+  checkout(
+    @Param('tenantId') tenantId: string,
+    @Body() dto: CheckoutDto,
+    @CurrentPrincipal() principal: Principal | undefined,
+  ) {
+    return this.orders.checkout(tenantId, dto, principal);
+  }
+
+  @Get('orders/:id')
+  @OptionalAuth('customer')
+  getOrder(
+    @Param('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @CurrentPrincipal() principal: Principal | undefined,
+    @Query('email') email?: string,
+  ) {
+    return this.orders.getForShopper(tenantId, id, principal, email);
+  }
+}
+
+/** A signed-in shopper's own order history. */
+@ApiTags('storefront-account')
+@Controller('storefront/:tenantId/account')
+@Auth('customer')
+export class CustomerOrdersController {
+  constructor(private readonly orders: OrdersService) {}
+
+  @Get('orders')
+  listMyOrders(
+    @Param('tenantId') tenantId: string,
+    @CurrentPrincipal() principal: Principal,
+    @Query() query: ListOrdersQueryDto,
+  ) {
+    if (!isCustomer(principal)) throw AppException.permissionDenied();
+    return this.orders.listForCustomer(tenantId, principal.customerId, query);
+  }
+}
+
+/** Admin order management — staff, gated by orders:* permissions. */
+@ApiTags('orders-admin')
+@Controller('tenants/:tenantId/orders')
+@Auth('staff', 'internal')
+export class OrdersAdminController {
+  constructor(private readonly orders: OrdersService) {}
 
   @Get()
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_VIEW)
-  @ApiOperation({ summary: 'List orders for the caller\'s tenant', description: `Requires ${PERMISSIONS.ORDERS_VIEW}` })
-  list(@CurrentUser() user: AuthContext, @Query() query: ListOrdersDto) {
-    return this.orders.list(user.tenantId, query);
-  }
-
-  @Get('export')
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_VIEW)
-  @Header('Content-Type', 'text/csv')
-  @ApiOperation({ summary: 'Export orders as CSV', description: `Requires ${PERMISSIONS.ORDERS_VIEW}. Honors the same filters as the list endpoint.` })
-  async export(@CurrentUser() user: AuthContext, @Query() query: ListOrdersDto, @Res() res: Response) {
-    const csv = await this.orders.exportCsv(user.tenantId, query);
-    res.setHeader('Content-Disposition', `attachment; filename="orders.csv"`);
-    res.send(csv);
-  }
-
-  @Get('public/:id')
-  @Public()
-  @ApiOperation({ summary: 'Customer-facing order lookup', description: 'Public. Requires the order id and the email it was placed under.' })
-  findPublic(@Param('id') id: string, @Query('email') email: string) {
-    return this.orders.findForCustomer(id, email);
+  @RequirePermission('orders:read')
+  list(@Param('tenantId') tenantId: string, @Query() query: ListOrdersQueryDto) {
+    return this.orders.listAdmin(tenantId, query);
   }
 
   @Get(':id')
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_VIEW)
-  @ApiOperation({ summary: 'Get an order', description: `Requires ${PERMISSIONS.ORDERS_VIEW}. Includes the status timeline and invoice, if any.` })
-  findOne(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    return this.orders.findOne(user.tenantId, id);
+  @RequirePermission('orders:read')
+  get(@Param('tenantId') tenantId: string, @Param('id') id: string) {
+    return this.orders.getAdmin(tenantId, id);
   }
 
-  @Post()
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_MANAGE)
-  @ApiOperation({ summary: 'Create an order', description: `Requires ${PERMISSIONS.ORDERS_MANAGE}. Snapshots each product's current price.` })
-  async create(@CurrentUser() user: AuthContext, @Body() dto: CreateOrderDto) {
-    const order = await this.orders.create(user.tenantId, dto);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'order.create',
-      resourceType: 'Order',
-      resourceId: order.id,
-      newValue: { customerId: order.customerId, totalCents: order.totalCents },
-    });
-    return order;
-  }
-
-  @Post(':id/confirm')
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_MANAGE)
-  @ApiOperation({
-    summary: 'Confirm an order',
-    description: `Requires ${PERMISSIONS.ORDERS_MANAGE}. Deducts stock for every line; rejected if any line is short.`,
-  })
-  async confirm(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    const order = await this.orders.confirm(user.tenantId, id);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'order.confirm',
-      resourceType: 'Order',
-      resourceId: id,
-    });
-    return order;
-  }
-
-  @Post(':id/ship')
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_MANAGE)
-  @ApiOperation({
-    summary: 'Mark an order shipped',
-    description: `Requires ${PERMISSIONS.ORDERS_MANAGE}. trackingNumber/courierName are optional manual entry — no courier API is wired up yet.`,
-  })
-  async ship(@CurrentUser() user: AuthContext, @Param('id') id: string, @Body() dto: ShipOrderDto) {
-    const order = await this.orders.ship(user.tenantId, id, dto.trackingNumber, dto.courierName);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'order.ship',
-      resourceType: 'Order',
-      resourceId: id,
-    });
-    return order;
-  }
-
-  @Post(':id/fulfill')
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_MANAGE)
-  @ApiOperation({ summary: 'Mark an order fulfilled', description: `Requires ${PERMISSIONS.ORDERS_MANAGE}. Also generates the invoice if one doesn't exist yet.` })
-  async fulfill(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    const order = await this.orders.fulfill(user.tenantId, id);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'order.fulfill',
-      resourceType: 'Order',
-      resourceId: id,
-    });
-    const invoice = await this.invoices.generateForOrder(user.tenantId, id);
-    return { ...order, invoice };
-  }
-
-  @Post(':id/cancel')
-  @ApiBearerAuth('access-token')
-  @RequirePermissions(PERMISSIONS.ORDERS_MANAGE)
-  @ApiOperation({
-    summary: 'Cancel an order',
-    description: `Requires ${PERMISSIONS.ORDERS_MANAGE}. Restocks any deducted stock if the order was confirmed or shipped. An optional reason is recorded on the timeline and sent to the customer.`,
-  })
-  async cancel(@CurrentUser() user: AuthContext, @Param('id') id: string, @Body() dto: CancelOrderDto) {
-    const order = await this.orders.cancel(user.tenantId, id, dto.reason);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'order.cancel',
-      resourceType: 'Order',
-      resourceId: id,
-      newValue: dto.reason ? { reason: dto.reason } : undefined,
-    });
-    return order;
+  @Patch(':id/status')
+  @RequirePermission('orders:write')
+  updateStatus(
+    @Param('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Body() dto: UpdateOrderStatusDto,
+    @CurrentPrincipal() principal: Principal,
+  ) {
+    const actor = isStaff(principal) ? principal.userId : 'internal';
+    return this.orders.updateStatus(tenantId, id, dto.status, actor);
   }
 }

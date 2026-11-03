@@ -1,137 +1,112 @@
-# ecom-saas backend
+# ecom backend
 
-NestJS + Prisma + PostgreSQL. Multi-tenant commerce backend: tenant registration (password or
-OAuth), argon2id auth with rotating refresh tokens, RBAC, strict tenant isolation, audit log,
-catalog, inventory, orders, a public per-tenant storefront, Razorpay payments, GST invoices,
-subscription billing, referrals, notifications (in-app / email / WhatsApp / SMS), marketing
-campaigns, and a cross-tenant platform-admin API. Swagger docs at `/docs` (non-production only).
+Category-agnostic, multi-tenant e-commerce API — **standalone**. It owns both
+identity (staff, shoppers, roles, permissions, MFA, sessions) and the commerce
+domain (catalog, orders, per-tenant settings and billing) in one service, one
+database, one deploy, behind PostgreSQL **row-level security**.
 
-## Run locally
+> Identity was folded in as **milestone 1** (see the plan). There is no separate
+> auth service: ecom signs its own RS256 tokens and serves its own JWKS at
+> `/.well-known/jwks.json`. `auth-rbac-service/` remains in the repo for
+> reference only and is not part of the running stack.
+
+## Identity, owned natively
+
+| Concern | Mechanism |
+| --- | --- |
+| Staff / shopper login, MFA, sessions | RS256 JWT signed here; refresh rotation + reuse detection |
+| Roles & permission catalog | seeded from `PERMISSION_CATALOG`; `products:*`, `store_settings:*`, … |
+| Tenant + owner creation | `POST /v1/onboarding/provision` — one in-process transaction (`X-Internal-Key`) |
+| Token verification | in-process over the local `JwtService` (no network hop) |
+| Catalog / orders / settings / billing | own Postgres + RLS |
+
+A local `Tenant.id` (`cuid()`) is embedded as the token's `tenant_id`, so identity
+and commerce data line up on one identifier.
+
+## Nothing hardcoded
+
+- **Products** carry core fields (name, price, images, stock) plus a
+  `custom_attributes` JSON blob validated on every write against the tenant's own
+  **JSON Schema** (`TenantSettings.productAttributeSchema`). A grocery store
+  requires `expiry_date`; an apparel store requires `size`/`color` — with zero
+  category-specific code. See `catalog/attribute-validator.service.ts`.
+- **Feature/limit gating** reads the tenant's `Plan` row through a single
+  `BillingService.hasFeature()` / `assertWithinLimit()` — no plan-name
+  conditionals anywhere.
+- **Roles/permissions** are enforced by `@RequirePermission('resource:action')`
+  against the caller's resolved set — never a role-name check.
+- **Theme** is admin data (`TenantSettings.theme`), served to the storefront to
+  render dynamically.
+
+## Security model
+
+- **RLS everywhere.** Every tenant-owned table is `FORCE ROW LEVEL SECURITY`,
+  keyed on `app.current_tenant`. The runtime role (`ecom_rls`) is a non-superuser;
+  the owner role (`DIRECT_URL`) is used only for migrations, RLS bootstrap and
+  seed. Missing context ⇒ zero rows (fails closed). See `prisma/rls.sql`.
+- **Two layers of tenant isolation:** the `AuthorizationGuard` rejects a token
+  whose `tenant_id` ≠ the `:tenantId` path param (`tenant_boundary_violation`),
+  on top of RLS. Both are asserted by the isolation gate.
+- **Guard chain:** `ThrottlerGuard` → `AuthenticationGuard` → `AuthorizationGuard`.
+- **Config validated at boot** (`env.validation.ts`); the process refuses to
+  start on a bad value, and won't boot in production with any secret still at its
+  dev placeholder (pepper, internal key, encryption key) or an insecure cookie.
+
+## Run it
 
 ```bash
-docker compose up -d          # Postgres on :5432
-cp .env.example .env          # then fill in the secrets below
-                               # generate each secret with: openssl rand -base64 48
-pnpm install
-pnpm prisma:migrate           # applies migrations, creates the DB
-pnpm seed:plans               # optional: example subscription plans
-pnpm start:dev                # http://localhost:4000
+# 0. Install
+npm install
 
-# One-time: create the first platform (cross-tenant super-admin) account
-PLATFORM_ADMIN_EMAIL=you@example.com PLATFORM_ADMIN_PASSWORD='...' pnpm seed:platform-admin
+# 1. Start Postgres + Redis (ports 5433 / 6380 to sit beside other local stacks)
+npm run infra:up
+
+# 2. Configure — defaults work for local dev
+cp .env.example .env
+
+# 3. Generate the RS256 signing keypair (writes gitignored ./keys)
+npm run keys:generate
+
+# 4. Schema (owner), then the runtime role + RLS (owner), then seed
+npm run db:migrate
+npm run db:security
+npm run db:seed              # plans, permission catalog, role templates, super admin
+
+# 5. Run
+npm run start:dev            # http://localhost:4001,  Swagger at /docs
 ```
 
-| Command | What it does |
-|---|---|
-| `pnpm start:dev` | Watch mode on :4000 |
-| `pnpm build` | Compile to `dist/` |
-| `pnpm test` | Jest unit suite |
-| `pnpm prisma:migrate` / `prisma:deploy` | Create+apply (dev) / apply only (prod) migrations |
-| `pnpm seed:plans`, `seed:platform-admin` | One-off seeds |
-| `scripts/storefront-smoke.ts` | Integration check in a disposable tenant (`--keep` for browser QA, then `--cleanup`) |
+Tenant provisioning is a single in-process transaction gated by `INTERNAL_API_KEY`
+— no external service to configure. Everything (identity, storefront reads,
+catalog under a valid token) runs against this service alone.
 
-## Configuration
+## Verify
 
-Everything except the database and JWT secrets is optional: an unset integration returns a
-clear error from *its* feature and never stops the app booting.
+```bash
+npm run build            # emits dist/main.js
+npm run lint             # clean across src + test
+npm test                 # guard unit specs (no infra)
+npm run test:isolation   # cross-tenant RLS gate (needs infra up + migrated + secured)
+```
 
-| Group | Variables | Notes |
-|---|---|---|
-| Core | `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `PLATFORM_JWT_SECRET`, `JWT_ACCESS_TTL`, `JWT_REFRESH_TTL`, `CORS_ORIGINS`, `COOKIE_SECURE`, `PORT` | Required: DB + the three secrets |
-| URLs | `FRONTEND_URL`, `BACKEND_URL` | Used for OAuth callbacks and links in emails |
-| Storefront | `STOREFRONT_TENANT_SLUG` | Fallback store for a bare `/store` visit only — see [Storefront](#storefront) |
-| Payments | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAYX_ACCOUNT_NUMBER` | Last one enables automatic referral payouts |
-| Email | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | From address must be on a domain verified in Resend |
-| WhatsApp / SMS | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, `TWILIO_SMS_FROM` | WhatsApp first, SMS as fallback |
-| OAuth | `GOOGLE_*`, `MICROSOFT_*`, `FACEBOOK_*`, `TWITTER_*` (`_CLIENT_ID` / `_CLIENT_SECRET`) | Redirect URI per provider: `${BACKEND_URL}/auth/oauth/<provider>/callback` |
+The isolation gate is the **blocking** check: it proves the runtime role sees
+zero rows without a tenant context, only the scoped tenant's rows with one, and
+cannot write a row for a foreign tenant.
 
-## Authentication
+## Endpoint map (v1)
 
-- **Password signup**: `POST /auth/register` creates a tenant + Owner user and seeds system roles
-  (Tenant Owner, Tenant Administrator, Analyst). Business name, email, password, and **legal
-  name are required**; GSTIN / PAN are optional but validated (format + GSTIN checksum).
-  Password rules: 12–128 chars, at least 3 of lowercase / uppercase / digit / symbol.
-- **OAuth signup and login** (Google, Microsoft, Facebook): `GET /auth/oauth/:provider?mode=register`
-  creates a workspace whose Owner has no password and is bound to that provider; the user then
-  completes business, legal name and tax details on the frontend `/onboarding` page.
-  `?tenantSlug=<slug>` signs into an existing workspace. An account can only sign in with the
-  provider it signed up with (others are told which one). Google emails must be provider-verified.
-  X (Twitter) never shares an email, so it cannot sign up (login fails closed).
-  The OAuth `state` is a signed 10-minute JWT carrying the mode (and the PKCE verifier).
-- **Sessions**: short-lived access token (memory only on the client) + rotating httpOnly refresh
-  cookie. `POST /auth/login` (`tenantSlug` + email + password), `/auth/refresh`, `/auth/logout`, `GET /auth/me`.
-- **Password reset**: `POST /auth/forgot-password` (identical response whether or not the email
-  exists; password accounts only) emails a link; `POST /auth/reset-password` sets the new password
-  and revokes every session. The link is a stateless 30-minute token bound to the current password
-  hash (signed with a derived key), so it works once and can't be replayed as an access token.
-- Permissions are re-read from the DB on every request, not cached in the JWT, so a suspension or
-  role change applies on the next request.
-- Every non-`@Public()` route requires `@RequirePermissions(...)` (deny by default).
-  Auth endpoints are rate limited. Platform routes use a separate identity and JWT.
+| Route | Credential | Notes |
+| --- | --- | --- |
+| `GET /healthz`, `/readyz` | none | probes (version-less) |
+| `POST /v1/onboarding/provision` | `X-Internal-Key` | create store + owner |
+| `GET/PATCH /v1/tenants/:tenantId/settings` | staff `store_settings:*` | config + theme |
+| `PUT /v1/tenants/:tenantId/settings/attribute-schema` | staff `store_settings:write` | define product attributes |
+| `GET /v1/tenants/:tenantId/billing/entitlements` | staff | plan features/limits |
+| `… /v1/tenants/:tenantId/products` (CRUD) | staff `products:*` | catalog admin |
+| `… /v1/tenants/:tenantId/categories` (CRUD) | staff `products:*` | categories |
+| `GET /v1/storefront/:tenantId/products` | none | ACTIVE products only |
+| `GET /v1/storefront/:tenantId/config` | none | theme + attribute schema |
 
-## Tenant isolation
-
-`PrismaService.forTenant(tenantId)` is the chokepoint every tenant-scoped query must go through
-(see the comment in `src/common/prisma/prisma.service.ts` for what it enforces and its limits).
-Public endpoints that have no logged-in tenant (storefront, public order lookup) resolve the tenant
-explicitly and never return internal ids.
-
-## Modules and endpoints
-
-- **Auth / users / roles**: routes above, plus `GET /users`, `POST /users/:id/suspend`, and
-  `GET/POST/PATCH/DELETE /roles` (+ `/clone`, `/archive`; custom roles are bounded by the creator's
-  own permissions).
-- **Tenants**: `PATCH /tenants/me/tax-info` — business `name`, legal name, GSTIN, PAN, billing
-  address, logo (HTTPS), home state for GST place-of-supply.
-- **Catalog**: products with variants and publish/unpublish/archive, CSV import/export.
-  `GET /products` accepts `category`, `search`, `status`, `sortBy`, `sortDir`, `includeArchived`.
-- **Inventory**: `GET /inventory`, `POST /inventory/:productId/adjust` (signed delta; can't go negative).
-- **Orders**: customers, orders with price snapshots, and the lifecycle
-  `PENDING → CONFIRMED → SHIPPED → FULFILLED` (or `CANCELLED`). Confirming deducts stock for every
-  line in one transaction; cancelling a confirmed order restocks. `/ship` takes `trackingNumber` and
-  `courierName`. Invalid transitions return 409. CSV export, returns/refund requests.
-  `GET /orders/public/:id?email=` is the customer-facing tracking lookup (email must match).
-- **Invoices**: GST invoice generation and PDF download (admin and customer).
-- **Payments**: `POST /orders/:id/payment` creates a Razorpay order; `POST /payments/webhook`
-  (signature-verified) marks it paid/failed.
-- **Billing**: plans, subscribe / change plan, Razorpay webhook.
-- **Referrals**: referral codes, commissions, UPI payout VPA; platform-side commission payout.
-- **Marketing**: audience preview and campaigns over email / WhatsApp / SMS, every message with an
-  unsubscribe link.
-- **Platform** (`/platform/*`): separate `PlatformAdmin` identity (created only via
-  `seed:platform-admin`); tenant review workflow (approve / reject / request revision / suspend /
-  reactivate), overview analytics, referral payouts.
-
-### Storefront
-
-Each tenant has its own public store. Public calls (`GET /storefront`, `/products`, `/quote`,
-`/checkout`, `/verify-payment`, `/reviews`) name the store with the `x-store-slug` header (the
-frontend sends it from `?store=<slug>`). Only `ACTIVE` tenants are served publicly. With no header,
-`STOREFRONT_TENANT_SLUG` is the fallback for anonymous visitors; leave it empty for no default
-store. Signed-in sellers preview their own store, whatever its status, via
-`GET /storefront/admin/preview`. `/storefront/admin/*` covers settings, offers, review moderation
-and analytics.
-
-## Notifications
-
-| Channel | Recipients | Requires |
-|---|---|---|
-| In-app bell | Team members (permission-aware), always written | — |
-| Email (Resend) | Customers; team members who haven't opted out | `RESEND_*` |
-| WhatsApp → SMS fallback (Twilio) | Customers with a phone | `TWILIO_*` |
-
-- **Customers**: order placed / confirmed / shipped (with tracking) / fulfilled / cancelled,
-  payment received or failed, return decision, invoice ready.
-- **Team**: new order, order cancelled, payment result, return requested, new review to moderate,
-  low / out-of-stock (once per threshold crossing), subscription events, workspace approval /
-  rejection / changes requested.
-- **Account**: welcome email on signup, password-reset link.
-
-Sending is fire-and-forget: a channel failure is logged and never fails the operation that triggered
-it. Without credentials, email/WhatsApp/SMS are skipped and only the in-app bell works.
-
-## Not built yet
-
-Email verification on signup; multi-warehouse inventory (one `InventoryItem` per product today);
-refresh-token rotation for platform admins; team invites. Look for `ponytail:` comments in the
-code for each deliberate shortcut and its upgrade path.
+Permission keys (`products:read/write`, `store_settings:read/write`, …) are
+defined in `PERMISSION_CATALOG` — the single source of truth this service owns —
+and seeded into the local `Permission` table.

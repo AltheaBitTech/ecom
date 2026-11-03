@@ -1,38 +1,43 @@
 {
-  "name": "frontend",
+  "name": "ecom-frontend",
   "version": "0.1.0",
   "private": true,
+  "description": "Storefront + tenant admin for the category-agnostic e-commerce platform. One Next.js app, two route groups, deployable independently of the backend.",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "dev": "next dev -p 3000",
+    "build": "next build --webpack",
+    "start": "next start -p 3000",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
+    "animejs": "^4.5.0",
     "class-variance-authority": "^0.7.1",
-    "cn": "^0.2.4",
-    "lucide-react": "^1.40.0",
-    "next": "16.3.4",
+    "clsx": "^2.1.1",
+    "jose": "^5.9.6",
+    "lucide-react": "^1.37.0",
+    "next": "16.3.3",
     "next-themes": "^0.4.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "recharts": "^3.10.1",
-    "shadcn": "^4.20.1",
     "sonner": "^2.0.8",
-    "three": "^0.185.1",
-    "tw-animate-css": "^1.4.0"
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "@types/three": "^0.185.4",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.4",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^22.10.7",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.3.3",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.7.3"
   },
-  "packageManager": "pnpm@11.24.0"
+  "overrides": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5"
+  }
 }

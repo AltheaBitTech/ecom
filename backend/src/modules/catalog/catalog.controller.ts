@@ -1,203 +1,120 @@
-import { Body, Controller, Delete, Get, Header, Param, Patch, Post, Query, Res } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { Response } from 'express';
-import { AuditService } from '../../common/auth/audit.service';
-import { CurrentUser } from '../../common/auth/current-user.decorator';
-import { RequirePermissions } from '../../common/auth/permissions.decorator';
-import type { AuthContext } from '../../common/auth/request-context';
-import { PERMISSIONS } from '../roles/permissions.catalog';
-import { CatalogService } from './catalog.service';
-import { CreateProductDto } from './dto/create-product.dto';
-import { UpdateProductDto } from './dto/update-product.dto';
-import { CreateVariantDto } from './dto/create-variant.dto';
-import { UpdateVariantDto } from './dto/update-variant.dto';
-import { ListProductsDto } from './dto/list-products.dto';
-import { ImportProductsDto } from './dto/import-products.dto';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 
-@ApiTags('catalog')
-@ApiBearerAuth('access-token')
-@Controller('products')
-export class CatalogController {
+import { Auth, Public, RequirePermission } from '../../common/auth/decorators';
+
+import { CategoriesService } from './categories.service';
+import {
+  CreateCategoryDto,
+  CreateProductDto,
+  ListProductsQueryDto,
+  UpdateCategoryDto,
+  UpdateProductDto,
+} from './dto/catalog.dto';
+import { ProductsService } from './products.service';
+
+/** Admin catalog management — staff, gated by products:* permissions. */
+@ApiTags('catalog-admin')
+@Controller('tenants/:tenantId')
+@Auth('staff', 'internal')
+export class CatalogAdminController {
   constructor(
-    private readonly catalog: CatalogService,
-    private readonly audit: AuditService,
+    private readonly products: ProductsService,
+    private readonly categories: CategoriesService,
   ) {}
 
-  @Get()
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_VIEW)
-  @ApiOperation({ summary: 'List products for the caller\'s tenant', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_VIEW}` })
-  list(@CurrentUser() user: AuthContext, @Query('includeArchived') includeArchived: string | undefined, @Query() query: ListProductsDto) {
-    return this.catalog.list(user.tenantId, includeArchived === 'true', query);
+  // --- Products --------------------------------------------------------------
+  @Post('products')
+  @RequirePermission('products:write')
+  createProduct(@Param('tenantId') tenantId: string, @Body() dto: CreateProductDto) {
+    return this.products.create(tenantId, dto);
   }
 
-  @Get('export')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_VIEW)
-  @Header('Content-Type', 'text/csv')
-  @ApiOperation({ summary: 'Export products as CSV', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_VIEW}` })
-  async export(@CurrentUser() user: AuthContext, @Res() res: Response) {
-    const csv = await this.catalog.exportCsv(user.tenantId);
-    res.setHeader('Content-Disposition', `attachment; filename="products.csv"`);
-    res.send(csv);
+  @Get('products')
+  @RequirePermission('products:read')
+  listProducts(@Param('tenantId') tenantId: string, @Query() query: ListProductsQueryDto) {
+    return this.products.list(tenantId, query);
   }
 
-  @Post('import')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Bulk create/update products from CSV', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}. Upserts by sku.` })
-  async import(@CurrentUser() user: AuthContext, @Body() dto: ImportProductsDto) {
-    const result = await this.catalog.importCsv(user.tenantId, dto.csv);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.import',
-      resourceType: 'Product',
-      resourceId: 'bulk',
-      newValue: result,
-    });
-    return result;
+  @Get('products/:id')
+  @RequirePermission('products:read')
+  getProduct(@Param('tenantId') tenantId: string, @Param('id') id: string) {
+    return this.products.get(tenantId, id);
   }
 
-  @Get(':id')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_VIEW)
-  @ApiOperation({ summary: 'Get a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_VIEW}` })
-  findOne(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    return this.catalog.findOne(user.tenantId, id);
-  }
-
-  @Post()
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Create a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}` })
-  async create(@CurrentUser() user: AuthContext, @Body() dto: CreateProductDto) {
-    const product = await this.catalog.create(user.tenantId, dto);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.create',
-      resourceType: 'Product',
-      resourceId: product.id,
-      newValue: { sku: product.sku, name: product.name, priceCents: product.priceCents },
-    });
-    return product;
-  }
-
-  @Patch(':id')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Update a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}` })
-  async update(@CurrentUser() user: AuthContext, @Param('id') id: string, @Body() dto: UpdateProductDto) {
-    const product = await this.catalog.update(user.tenantId, id, dto);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.update',
-      resourceType: 'Product',
-      resourceId: id,
-      newValue: dto,
-    });
-    return product;
-  }
-
-  @Post(':id/archive')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Archive a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}. Archived products are hidden by default and cannot be added to new orders.` })
-  async archive(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    const product = await this.catalog.archive(user.tenantId, id);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.archive',
-      resourceType: 'Product',
-      resourceId: id,
-    });
-    return product;
-  }
-
-  @Post(':id/publish')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Publish a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}. Requires name, sku and a positive priceCents.` })
-  async publish(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    const product = await this.catalog.publish(user.tenantId, id);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.publish',
-      resourceType: 'Product',
-      resourceId: id,
-    });
-    return product;
-  }
-
-  @Post(':id/unpublish')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Unpublish a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}. Moves the product back to draft.` })
-  async unpublish(@CurrentUser() user: AuthContext, @Param('id') id: string) {
-    const product = await this.catalog.unpublish(user.tenantId, id);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.unpublish',
-      resourceType: 'Product',
-      resourceId: id,
-    });
-    return product;
-  }
-
-  @Post(':id/variants')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Add a variant to a product', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}. Label is free text (size, weight, or any other axis).` })
-  async addVariant(@CurrentUser() user: AuthContext, @Param('id') productId: string, @Body() dto: CreateVariantDto) {
-    const variant = await this.catalog.addVariant(user.tenantId, productId, dto);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.variant.create',
-      resourceType: 'ProductVariant',
-      resourceId: variant.id,
-      newValue: { productId, label: variant.label, priceCents: variant.priceCents },
-    });
-    return variant;
-  }
-
-  @Patch(':id/variants/:variantId')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Update a product variant', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}` })
-  async updateVariant(
-    @CurrentUser() user: AuthContext,
-    @Param('id') productId: string,
-    @Param('variantId') variantId: string,
-    @Body() dto: UpdateVariantDto,
+  @Patch('products/:id')
+  @RequirePermission('products:write')
+  updateProduct(
+    @Param('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Body() dto: UpdateProductDto,
   ) {
-    const variant = await this.catalog.updateVariant(user.tenantId, productId, variantId, dto);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.variant.update',
-      resourceType: 'ProductVariant',
-      resourceId: variantId,
-      newValue: dto,
-    });
-    return variant;
+    return this.products.update(tenantId, id, dto);
   }
 
-  @Delete(':id/variants/:variantId')
-  @RequirePermissions(PERMISSIONS.CATALOG_PRODUCTS_MANAGE)
-  @ApiOperation({ summary: 'Archive a product variant', description: `Requires ${PERMISSIONS.CATALOG_PRODUCTS_MANAGE}. Past orders keep their snapshot of it.` })
-  async archiveVariant(@CurrentUser() user: AuthContext, @Param('id') productId: string, @Param('variantId') variantId: string) {
-    const variant = await this.catalog.archiveVariant(user.tenantId, productId, variantId);
-    await this.audit.log({
-      tenantId: user.tenantId,
-      actorId: user.userId,
-      actorEmail: user.email,
-      action: 'product.variant.archive',
-      resourceType: 'ProductVariant',
-      resourceId: variantId,
-    });
-    return variant;
+  @Delete('products/:id')
+  @RequirePermission('products:write')
+  deleteProduct(@Param('tenantId') tenantId: string, @Param('id') id: string) {
+    return this.products.remove(tenantId, id);
+  }
+
+  // --- Categories ------------------------------------------------------------
+  @Post('categories')
+  @RequirePermission('products:write')
+  createCategory(@Param('tenantId') tenantId: string, @Body() dto: CreateCategoryDto) {
+    return this.categories.create(tenantId, dto);
+  }
+
+  @Get('categories')
+  @RequirePermission('products:read')
+  listCategories(@Param('tenantId') tenantId: string) {
+    return this.categories.list(tenantId);
+  }
+
+  @Patch('categories/:id')
+  @RequirePermission('products:write')
+  updateCategory(
+    @Param('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Body() dto: UpdateCategoryDto,
+  ) {
+    return this.categories.update(tenantId, id, dto);
+  }
+
+  @Delete('categories/:id')
+  @RequirePermission('products:write')
+  deleteCategory(@Param('tenantId') tenantId: string, @Param('id') id: string) {
+    return this.categories.remove(tenantId, id);
+  }
+}
+
+/**
+ * Public storefront catalog — no credential. Shoppers browse ACTIVE products
+ * for a store by its tenant id. RLS still scopes every read to that tenant.
+ */
+@ApiTags('storefront')
+@Controller('storefront/:tenantId')
+export class StorefrontCatalogController {
+  constructor(
+    private readonly products: ProductsService,
+    private readonly categories: CategoriesService,
+  ) {}
+
+  @Get('products')
+  @Public()
+  listProducts(@Param('tenantId') tenantId: string, @Query() query: ListProductsQueryDto) {
+    return this.products.listPublished(tenantId, query);
+  }
+
+  @Get('products/:id')
+  @Public()
+  getProduct(@Param('tenantId') tenantId: string, @Param('id') id: string) {
+    return this.products.getPublished(tenantId, id);
+  }
+
+  @Get('categories')
+  @Public()
+  listCategories(@Param('tenantId') tenantId: string) {
+    return this.categories.list(tenantId);
   }
 }

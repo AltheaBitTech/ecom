@@ -1,646 +1,886 @@
+// ecom backend data model.
+//
+// Identity (staff, customers, roles, permissions) lives in auth-rbac-service.
+// This schema owns the commerce domain: catalog, orders, per-tenant settings
+// and billing. Every tenant-owned table carries `tenant_id` and is protected by
+// PostgreSQL row-level security (see prisma/rls.sql) — application filtering is
+// a convenience, never the security boundary.
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider  = "postgresql"
-  // Supabase's pooled (pgbouncer) connection — required at runtime since serverless
-  // functions open many short-lived connections. directUrl below bypasses the pooler
-  // for migrations, which pgbouncer's transaction mode doesn't support.
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  url       = env("DATABASE_URL") // RLS-forced, non-superuser runtime role
+  directUrl = env("DIRECT_URL") // owner role: migrations / RLS bootstrap / seed only
 }
 
 // ---------------------------------------------------------------------------
-// Tenant
+// Tenant (a store) — the root of a tenant's data. `id` is issued locally
+// (cuid) and is the subject of every token's `tenant_id` claim; RLS keys on it.
+// `isolationTier` selects where this tenant's data physically lives (pooled →
+// schema → dedicated), driven by its subscription plan. `forTenant()` reads it
+// to route the connection; POOLED (shared DB + RLS) is the default.
 // ---------------------------------------------------------------------------
+model Tenant {
+  id     String       @id @default(cuid())
+  slug   String       @unique // subdomain label, e.g. "acme" -> acme.shops.example
+  name   String
+  status TenantStatus @default(ACTIVE)
+
+  // Data-plane routing. SCHEMA uses `dbSchema`; DEDICATED uses `dbUrlEnc`
+  // (an encrypted connection string). Both null while POOLED.
+  isolationTier IsolationTier @default(POOLED) @map("isolation_tier")
+  dbSchema      String?       @map("db_schema")
+  dbUrlEnc      String?       @map("db_url_enc")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  settings          TenantSettings?
+  subscription      Subscription?
+  categories        Category[]
+  products          Product[]
+  orders            Order[]
+  flashSales        FlashSale[]
+  auditLogs         AuditLog[]
+  payments          Payment[]
+  paymentAccount    PaymentAccount?
+  shipments         Shipment[]
+  shippingAccount   ShippingAccount?
+  customerAddresses CustomerAddress[]
+  mediaAssets       MediaAsset[]
+
+  // Identity (folded in from the former auth-rbac-service).
+  roles       Role[]
+  memberships UserTenantRole[]
+  customers   Customer[]
+  domains     Domain[]
+
+  @@map("tenants")
+}
 
 enum TenantStatus {
-  PENDING_VERIFICATION
-  PROFILE_INCOMPLETE
-  UNDER_REVIEW
-  REVISION_REQUESTED
-  APPROVED
-  REJECTED
   ACTIVE
   SUSPENDED
-  DEACTIVATED
+
+  @@map("tenant_status")
 }
 
-model Tenant {
-  id        String       @id @default(uuid())
-  name      String
-  slug      String       @unique
-  status    TenantStatus @default(PENDING_VERIFICATION)
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+enum IsolationTier {
+  POOLED // shared DB + row-level security (default)
+  SCHEMA // dedicated Postgres schema in the shared DB
+  DEDICATED // dedicated database (own connection)
 
-  // India GST registration, captured at/after signup — nullable since a tenant can be
-  // ACTIVE before completing tax registration (enforced in application code, not the schema).
-  gstin          String?
-  legalName      String?
-  pan            String?
-  billingAddress Json?
-  // Home state for GST place-of-supply: CGST+SGST when it matches the shipping
-  // state, IGST otherwise. Nullable — falls back to a flat "GST" line on invoices
-  // until both this and the order's shipping state are known.
-  state          String?
-  // HTTPS URL to a hosted image, same pattern as storefront.heroImage — no upload/storage
-  // service in this codebase, so tenants point at an image they host elsewhere.
-  logoUrl        String?
-
-  users           User[]
-  notifications   Notification[]
-  campaigns       Campaign[]
-  roles           Role[]
-  auditLogs       AuditLog[]
-  products        Product[]
-  productVariants ProductVariant[]
-  inventoryItems  InventoryItem[]
-  customers       Customer[]
-  orders          Order[]
-  payments        Payment[]
-  storefront      Json             @default("{}")
-  coupons         Coupon[]
-  reviews         Review[]
-  invoices        Invoice[]
-
-  subscription   Subscription?
-  referralCode   ReferralCode?
-  referredBy     Referral?       @relation("RefereeTenant")
-  returnRequests ReturnRequest[]
-
-  @@index([status])
+  @@map("isolation_tier")
 }
 
 // ---------------------------------------------------------------------------
-// Identity
+// Per-tenant configuration — theme, locale, custom domain, and the tenant's
+// OWN product attribute schema. `productAttributeSchema` is a JSON Schema the
+// tenant defines; product.customAttributes is validated against it. This is
+// what lets a food store define "expiry_date" and an apparel store define
+// "size"/"color" with zero category-specific code anywhere.
 // ---------------------------------------------------------------------------
+model TenantSettings {
+  tenantId String @id @map("tenant_id")
 
-enum UserStatus {
-  ACTIVE
-  INVITED
-  SUSPENDED
+  storeName String @map("store_name")
+  currency  String @default("INR")
+  locale    String @default("en-IN")
+
+  // Storefront theme: colors, logo, fonts, layout blocks. Rendered dynamically.
+  theme Json @default("{}")
+  draftTheme        Json      @default("{}") @map("draft_theme")
+  draftRevision     Int       @default(0) @map("draft_revision")
+  publishedRevision Int       @default(0) @map("published_revision")
+  publishedAt       DateTime? @map("published_at")
+
+  // JSON Schema (draft-07) describing allowed keys in Product.customAttributes.
+  productAttributeSchema Json @default("{}") @map("product_attribute_schema")
+
+  customDomain         String? @unique @map("custom_domain")
+  customDomainVerified Boolean @default(false) @map("custom_domain_verified")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_settings")
 }
 
-// How this user proves who they are. A user is locked to exactly one — see
-// AuthService.socialLogin for why (prevents one email being hijacked via a second provider).
-enum AuthProvider {
-  PASSWORD
-  GOOGLE
-  FACEBOOK
-  MICROSOFT
-  TWITTER
+enum MediaStatus {
+  UPLOADING
+  READY
+  ARCHIVED
+
+  @@map("media_status")
 }
 
-model User {
-  id           String       @id @default(uuid())
-  tenantId     String
-  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  email        String
-  passwordHash String?
-  authProvider AuthProvider @default(PASSWORD)
-  status       UserStatus   @default(ACTIVE)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+model MediaAsset {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
 
-  // Opt-out for the email/WhatsApp copy of admin alerts. In-app notifications are always
-  // delivered — they cost the user nothing until they open the bell.
-  emailNotifications Boolean @default(true)
+  objectKey String      @unique @map("object_key") @db.Text
+  filename  String      @db.Text
+  mimeType  String      @map("mime_type") @db.Text
+  sizeBytes Int         @map("size_bytes")
+  altText   String?     @map("alt_text") @db.Text
+  width     Int?
+  height    Int?
+  status    MediaStatus @default(UPLOADING)
 
-  roles         UserRole[]
-  refreshTokens RefreshToken[]
-  notifications Notification[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  @@unique([tenantId, email])
-  @@index([tenantId])
-}
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-// An admin-facing alert shown in the dashboard's notification bell. One row per recipient
-// (not per event), so read state is per-user without a join table.
-model Notification {
-  id        String    @id @default(uuid())
-  tenantId  String
-  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  userId    String
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title     String
-  body      String
-  // In-app deep link to whatever the notification is about, e.g. /admin/orders/<id>.
-  link      String?
-  readAt    DateTime?
-  createdAt DateTime  @default(now())
-
-  @@index([userId, readAt])
-  @@index([tenantId])
-}
-
-// A Role holds a flat list of permission strings, e.g. "catalog.products.create.tenant".
-// Custom roles (isSystem = false) are created by tenant owners/admins and are bounded
-// at creation time to a subset of the creator's own permissions (enforced in RolesService,
-// not in the schema).
-model Role {
-  id          String    @id @default(uuid())
-  tenantId    String
-  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  isSystem    Boolean   @default(false)
-  permissions String[]
-  archivedAt  DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-
-  users UserRole[]
-
-  @@unique([tenantId, name])
-  @@index([tenantId])
-}
-
-model UserRole {
-  id     String @id @default(uuid())
-  userId String
-  roleId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, roleId])
-  @@index([roleId])
-}
-
-// Refresh tokens are stored hashed (never plaintext) and rotated on every use.
-model RefreshToken {
-  id         String    @id @default(uuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash  String    @unique
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  replacedBy String?
-  createdAt  DateTime  @default(now())
-
-  @@index([userId])
+  @@index([tenantId, status, createdAt])
+  @@map("media_assets")
 }
 
 // ---------------------------------------------------------------------------
-// Catalog & inventory
+// Billing. Plan is GLOBAL catalog data (seeded, not tenant-owned). Feature and
+// limit gating reads Plan.features/limits through a single hasFeature() helper —
+// never scattered plan-name conditionals.
 // ---------------------------------------------------------------------------
+model Plan {
+  key        String  @id // starter | pro | enterprise
+  name       String
+  priceCents Int     @default(0) @map("price_cents")
+  currency   String  @default("INR")
+  // { "customDomains": true, "analytics": true, ... }
+  features   Json    @default("{}")
+  // { "products": 100, "staffSeats": 3, "customDomains": 0 }  (-1 = unlimited)
+  limits     Json    @default("{}")
+  isPublic   Boolean @default(true) @map("is_public")
+  position   Int     @default(0)
 
-model Product {
-  id             String    @id @default(uuid())
-  tenantId       String
-  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sku            String
-  name           String
-  description    String?
-  imageUrl       String?
-  images         String[]  @default([])
-  videos         String[]  @default([])
-  labels         String[]  @default([])
-  category       String    @default("Other")
-  featured       Boolean   @default(false)
-  compareAtCents Int?
-  priceCents     Int
-  currency       String    @default("INR")
-  // India GST: rate in basis points (1800 = 18%) and the HSN code it's filed under.
-  // 0 is a valid rate (exempt goods) — nullable HSN since not every tenant is registered yet.
-  gstRateBps     Int       @default(0)
-  hsnCode        String?
-  publishedAt    DateTime?
-  archivedAt     DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  subscriptions Subscription[]
 
-  inventory  InventoryItem?
-  orderItems OrderItem[]
-  variants   ProductVariant[]
-  reviews    Review[]
-
-  @@unique([tenantId, sku])
-  @@index([tenantId])
+  @@map("plans")
 }
 
-// A product's sellable options — label is free text ("Half"/"Full", "250 Gram"/"500 Gram", any
-// future axis) rather than a fixed weight/size enum, so one mechanism covers every product type.
-// A product with no variant rows just sells at its own priceCents, unchanged.
-model ProductVariant {
-  id             String    @id @default(uuid())
-  tenantId       String
-  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  productId      String
-  product        Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
-  label          String
-  priceCents     Int
-  compareAtCents Int?
-  archivedAt     DateTime?
-  createdAt      DateTime  @default(now())
+model Subscription {
+  id       String @id @default(cuid())
+  tenantId String @unique @map("tenant_id")
+  planKey  String @map("plan_key")
 
-  orderItems OrderItem[]
+  status               SubscriptionStatus @default(TRIALING)
+  currentPeriodEnd     DateTime?          @map("current_period_end")
+  stripeCustomerId     String?            @map("stripe_customer_id")
+  stripeSubscriptionId String?            @map("stripe_subscription_id")
 
-  @@index([tenantId, productId])
-}
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-// One row per product (single-warehouse MVP — see ponytail note in inventory.service.ts).
-model InventoryItem {
-  id               String   @id @default(uuid())
-  tenantId         String
-  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  productId        String   @unique
-  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  quantityOnHand   Int      @default(0)
-  reorderThreshold Int      @default(0)
-  updatedAt        DateTime @updatedAt
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   Plan   @relation(fields: [planKey], references: [key])
 
   @@index([tenantId])
+  @@map("subscriptions")
 }
-
-// ---------------------------------------------------------------------------
-// Orders
-// ---------------------------------------------------------------------------
-
-enum OrderStatus {
-  PENDING
-  CONFIRMED
-  SHIPPED
-  FULFILLED
-  CANCELLED
-}
-
-enum PaymentStatus {
-  PENDING
-  PAID
-  FAILED
-  REFUNDED
-}
-
-model Customer {
-  id        String   @id @default(uuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name      String
-  email     String?
-  phone     String?
-  createdAt DateTime @default(now())
-
-  // Marketing consent. Defaults to false and is only ever set by the shopper ticking the box at
-  // checkout — never by an admin, and never backfilled for customers who predate it. A campaign
-  // reaching someone who did not ask for it is the one failure mode this feature must not have.
-  marketingOptIn Boolean   @default(false)
-  unsubscribedAt DateTime?
-
-  orders Order[]
-
-  @@index([tenantId])
-}
-
-enum CampaignStatus {
-  SENDING
-  SENT
-  FAILED
-}
-
-// A record of one broadcast: what was said, to whom, over which channels, and how it landed.
-// Kept so a merchant can see what marketing already went out, and so a complaint can be traced.
-model Campaign {
-  id             String         @id @default(uuid())
-  tenantId       String
-  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  subject        String
-  body           String
-  channels       String[]
-  audience       String
-  recipientCount Int            @default(0)
-  sentCount      Int            @default(0)
-  failedCount    Int            @default(0)
-  status         CampaignStatus @default(SENDING)
-  createdByEmail String?
-  createdAt      DateTime       @default(now())
-  completedAt    DateTime?
-
-  @@index([tenantId])
-}
-
-model Order {
-  id             String      @id @default(uuid())
-  tenantId       String
-  tenant         Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customerId     String
-  customer       Customer    @relation(fields: [customerId], references: [id])
-  status         OrderStatus @default(PENDING)
-  totalCents     Int
-  subtotalCents  Int         @default(0)
-  discountCents  Int         @default(0)
-  shippingCents  Int         @default(0)
-  taxCents       Int         @default(0)
-  couponCode     String?
-  delivery       Json?
-  // Set when the order ships — manually today, or by a courier API integration later.
-  trackingNumber String?
-  courierName    String?
-  reviews        Review[]
-  currency       String      @default("INR")
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-
-  items   OrderItem[]
-  payment Payment?
-  events  OrderEvent[]
-  invoice Invoice?
-  returns ReturnRequest[]
-
-  @@index([tenantId, status])
-}
-
-enum ReturnStatus {
-  REQUESTED
-  APPROVED
-  REJECTED
-  REFUNDED
-}
-
-// Customer-initiated return/refund request against a fulfilled order.
-model ReturnRequest {
-  id          String       @id @default(uuid())
-  tenantId    String
-  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  orderId     String
-  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  reason      String
-  status      ReturnStatus @default(REQUESTED)
-  refundCents Int?
-  adminNote   String?
-  createdAt   DateTime     @default(now())
-  resolvedAt  DateTime?
-
-  @@index([tenantId, status])
-  @@index([orderId])
-}
-
-// Timeline of status changes for the animated order-tracking UI — appended to, never edited.
-model OrderEvent {
-  id        String      @id @default(uuid())
-  orderId   String
-  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  status    OrderStatus
-  note      String?
-  createdAt DateTime    @default(now())
-
-  @@index([orderId, createdAt])
-}
-
-model OrderItem {
-  id             String          @id @default(uuid())
-  orderId        String
-  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productId      String
-  product        Product         @relation(fields: [productId], references: [id])
-  variantId      String?
-  variant        ProductVariant? @relation(fields: [variantId], references: [id])
-  variantLabel   String?
-  quantity       Int
-  unitPriceCents Int
-  lineTotalCents Int
-
-  @@index([orderId])
-}
-
-model Coupon {
-  id                   String   @id @default(uuid())
-  tenantId             String
-  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  code                 String
-  title                String
-  description          String   @default("")
-  kind                 String
-  value                Int
-  minimumCents         Int      @default(0)
-  maximumDiscountCents Int?
-  startsAt             DateTime
-  endsAt               DateTime
-  active               Boolean  @default(true)
-  maxRedemptions       Int?
-  perCustomerLimit     Int?
-  createdAt            DateTime @default(now())
-
-  @@unique([tenantId, code])
-  @@index([tenantId, active, endsAt])
-}
-
-model Review {
-  id          String   @id @default(uuid())
-  tenantId    String
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  productId   String
-  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  orderId     String
-  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  displayName String
-  rating      Int
-  body        String
-  published   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-
-  @@unique([orderId, productId])
-  @@index([tenantId, published, createdAt])
-}
-
-// One row per order — Razorpay is the only provider today (see PaymentsService).
-model Payment {
-  id                String        @id @default(uuid())
-  tenantId          String
-  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  orderId           String        @unique
-  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  provider          String        @default("razorpay")
-  providerOrderId   String        @unique
-  providerPaymentId String?
-  status            PaymentStatus @default(PENDING)
-  amountCents       Int
-  currency          String        @default("INR")
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
-
-  @@index([tenantId])
-}
-
-// ---------------------------------------------------------------------------
-// Billing (platform subscriptions — a Tenant pays us, not a storefront order)
-// ---------------------------------------------------------------------------
 
 enum SubscriptionStatus {
   TRIALING
   ACTIVE
   PAST_DUE
-  CANCELLED
-}
+  CANCELED
 
-model Plan {
-  id           String   @id @default(uuid())
-  name         String   @unique
-  priceCents   Int
-  currency     String   @default("INR")
-  intervalDays Int      @default(30)
-  features     String[] @default([])
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-
-  subscriptions Subscription[]
-}
-
-model Subscription {
-  id                     String             @id @default(uuid())
-  tenantId               String             @unique
-  tenant                 Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  planId                 String
-  plan                   Plan               @relation(fields: [planId], references: [id])
-  status                 SubscriptionStatus @default(TRIALING)
-  razorpaySubscriptionId String?            @unique
-  currentPeriodEnd       DateTime?
-  cancelAtPeriodEnd      Boolean            @default(false)
-  createdAt              DateTime           @default(now())
-  updatedAt              DateTime           @updatedAt
-
-  payments SubscriptionPayment[]
-
-  @@index([status])
-}
-
-// One row per billing-cycle charge — the ledger referral commissions and invoices read from.
-model SubscriptionPayment {
-  id                String        @id @default(uuid())
-  subscriptionId    String
-  subscription      Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  providerPaymentId String?       @unique
-  amountCents       Int
-  currency          String        @default("INR")
-  status            PaymentStatus @default(PENDING)
-  paidAt            DateTime?
-  createdAt         DateTime      @default(now())
-
-  referralCommission ReferralCommission?
-  invoice            Invoice?
-
-  @@index([subscriptionId])
+  @@map("subscription_status")
 }
 
 // ---------------------------------------------------------------------------
-// Referral program (a Tenant refers other Tenants to sign up and subscribe)
+// Catalog.
 // ---------------------------------------------------------------------------
+model Category {
+  id          String  @id @default(cuid())
+  tenantId    String  @map("tenant_id")
+  name        String
+  slug        String
+  parentId    String? @map("parent_id")
+  position    Int     @default(0)
+  description String? @db.VarChar(500)
+  imageUrl    String? @map("image_url") @db.Text
+  isFeatured  Boolean @default(false) @map("is_featured")
 
-enum ReferralStatus {
-  PENDING
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+  @@index([tenantId, isFeatured, position])
+  @@map("categories")
+}
+
+model Product {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  slug        String
+  description String?       @db.Text
+  status      ProductStatus @default(DRAFT)
+
+  priceCents          Int     @default(0) @map("price_cents")
+  currency            String  @default("INR")
+  stock               Int     @default(0)
+  compareAtPriceCents Int?    @map("compare_at_price_cents")
+  isFeatured          Boolean @default(false) @map("is_featured")
+  isBestseller        Boolean @default(false) @map("is_bestseller")
+  badge               String? @db.VarChar(32)
+
+  // Shipping weight in grams, used by carrier rate quotes. Category-agnostic; a
+  // sane default so real carriers get a non-zero package weight.
+  weightGrams Int @default(500) @map("weight_grams")
+
+  // Ordered array of image URLs/objects.
+  images Json @default("[]")
+
+  // Tenant-defined attributes, validated at write time against the tenant's
+  // productAttributeSchema. The engine never inspects specific keys.
+  customAttributes Json @default("{}") @map("custom_attributes")
+
+  categoryId String? @map("category_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category   Category?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  orderItems OrderItem[]
+  flashSales FlashSale[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, isFeatured, status])
+  @@index([tenantId, isBestseller, status])
+  @@map("products")
+}
+
+enum ProductStatus {
+  DRAFT
   ACTIVE
-  ENDED
+  ARCHIVED
+
+  @@map("product_status")
 }
 
-enum CommissionStatus {
-  PENDING
-  PAID
-}
+// A time-boxed price promotion on a product. Status (upcoming/ongoing/expired)
+// is derived from startsAt/endsAt at read time — never stored, so no cron is
+// needed to "expire" a sale.
+model FlashSale {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
 
-model ReferralCode {
-  id            String   @id @default(uuid())
-  tenantId      String   @unique
-  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  code          String   @unique
-  // Basis points (1000 = 10%) this referrer earns. Null = platform default rate;
-  // set by a platform admin for VIP overrides (e.g. 2000 = 20%).
-  commissionBps Int?
-  // UPI VPA the referrer wants commission payouts sent to. Set by the tenant themselves;
-  // required only if they want automatic RazorpayX payout instead of manual settlement.
-  payoutVpa     String?
-  createdAt     DateTime @default(now())
+  productId      String   @map("product_id")
+  salePriceCents Int      @map("sale_price_cents")
+  startsAt       DateTime @map("starts_at")
+  endsAt         DateTime @map("ends_at")
 
-  referrals Referral[]
-}
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-model Referral {
-  id              String         @id @default(uuid())
-  referralCodeId  String
-  referralCode    ReferralCode   @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
-  refereeTenantId String         @unique
-  refereeTenant   Tenant         @relation("RefereeTenant", fields: [refereeTenantId], references: [id], onDelete: Cascade)
-  status          ReferralStatus @default(PENDING)
-  createdAt       DateTime       @default(now())
-
-  commissions ReferralCommission[]
-
-  @@index([referralCodeId])
-}
-
-// One row per subscription payment the referral earned a cut of — paid out once the
-// referee's payment actually clears, never speculatively.
-model ReferralCommission {
-  id                    String              @id @default(uuid())
-  referralId            String
-  referral              Referral            @relation(fields: [referralId], references: [id], onDelete: Cascade)
-  subscriptionPaymentId String              @unique
-  subscriptionPayment   SubscriptionPayment @relation(fields: [subscriptionPaymentId], references: [id], onDelete: Cascade)
-  rateBps               Int
-  amountCents           Int
-  status                CommissionStatus    @default(PENDING)
-  // Set only when payout actually happened via RazorpayX (POST /payouts). Null + PAID means
-  // it was settled manually outside the system (no VPA on file, or RazorpayX unconfigured).
-  payoutId              String?
-  paidAt                DateTime?
-  createdAt             DateTime            @default(now())
-
-  @@index([referralId])
-}
-
-// ---------------------------------------------------------------------------
-// Invoicing (storefront orders and platform subscription charges both invoice here)
-// ---------------------------------------------------------------------------
-
-model Invoice {
-  id                    String               @id @default(uuid())
-  tenantId              String
-  tenant                Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  orderId               String?              @unique
-  order                 Order?               @relation(fields: [orderId], references: [id])
-  subscriptionPaymentId String?              @unique
-  subscriptionPayment   SubscriptionPayment? @relation(fields: [subscriptionPaymentId], references: [id])
-  number                String               @unique
-  billedToName          String
-  billedToGstin         String?
-  subtotalCents         Int
-  taxCents              Int                  @default(0)
-  shippingCents         Int                  @default(0)
-  totalCents            Int
-  currency              String               @default("INR")
-  issuedAt              DateTime             @default(now())
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
+  @@index([tenantId, startsAt, endsAt])
+  @@map("flash_sales")
 }
 
 // ---------------------------------------------------------------------------
-// Platform (cross-tenant super-admin, not a tenant User — see platform.module.ts)
+// Orders. Shoppers are auth-rbac-service customers (per-store) OR guests.
+// customerId is the customer token subject; guestEmail covers guest checkout.
 // ---------------------------------------------------------------------------
+model Order {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
 
-model PlatformAdmin {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
+  number     String      @map("number") // human-facing, unique per tenant
+  status     OrderStatus @default(PENDING)
+  customerId String?     @map("customer_id") // auth customer id, null for guest
+  guestEmail String?     @map("guest_email")
+
+  subtotalCents Int    @default(0) @map("subtotal_cents")
+  shippingCents Int    @default(0) @map("shipping_cents")
+  totalCents    Int    @default(0) @map("total_cents")
+  currency      String @default("INR")
+
+  shippingAddress Json? @map("shipping_address")
+  metadata        Json  @default("{}")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items     OrderItem[]
+  payments  Payment[]
+  shipments Shipment[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, customerId])
+  @@map("orders")
 }
 
-// Immutable audit trail. Never updated or deleted by application code.
+model OrderItem {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  orderId  String @map("order_id")
+
+  productId    String? @map("product_id") // nullable: product may be deleted later
+  nameSnapshot String  @map("name_snapshot")
+  priceCents   Int     @map("price_cents")
+  quantity     Int     @default(1)
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([orderId])
+  @@map("order_items")
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLED
+  CANCELLED
+  REFUNDED
+
+  @@map("order_status")
+}
+
+// ---------------------------------------------------------------------------
+// Customer address book. The customer identity itself lives in auth-rbac-service
+// (per-store); ecom only owns commerce data about that customer. `customerId` is
+// the auth-rbac customer id (the token `sub`) — there is no local FK because the
+// row is the source of truth over there. Addresses are the shopper's saved
+// shipping/billing destinations, reused at checkout. RLS scopes to the tenant;
+// application queries additionally scope to `customerId` so one shopper can
+// never read another's addresses within the same store.
+// ---------------------------------------------------------------------------
+model CustomerAddress {
+  id         String @id @default(cuid())
+  tenantId   String @map("tenant_id")
+  customerId String @map("customer_id") // auth-rbac customer id (token sub)
+
+  label      String? // "Home", "Work" — optional shopper label
+  fullName   String  @map("full_name")
+  phone      String?
+  line1      String
+  line2      String?
+  city       String
+  state      String?
+  postalCode String  @map("postal_code")
+  country    String
+  isDefault  Boolean @default(false) @map("is_default")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@map("customer_addresses")
+}
+
+// ---------------------------------------------------------------------------
+// Payments. Category-agnostic and gateway-pluggable: each tenant connects their
+// OWN payment account (Razorpay, or a manual/COD flow). Credentials live in
+// PaymentAccount with the secret fields encrypted at rest (SecretBox); only the
+// public key id is ever returned. Payment is the attempt/receipt ledger for an
+// order — the order stays PENDING until a payment is captured (verified by
+// signature or webhook), which is the ONLY thing that moves it to PAID.
+// ---------------------------------------------------------------------------
+model PaymentAccount {
+  tenantId String @id @map("tenant_id")
+
+  provider String  @default("manual") // razorpay | manual
+  enabled  Boolean @default(true)
+
+  // Public, safe to expose to the storefront (Razorpay key_id).
+  publicKey String? @map("public_key")
+
+  // SecretBox tokens — encrypted at rest, never returned by the API.
+  secretKeyEnc     String? @map("secret_key_enc")
+  webhookSecretEnc String? @map("webhook_secret_enc")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("payment_accounts")
+}
+
+model Payment {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  orderId  String @map("order_id")
+
+  provider    String
+  status      PaymentStatus @default(CREATED)
+  amountCents Int           @map("amount_cents")
+  currency    String        @default("INR")
+
+  // Gateway-side identifiers. providerPaymentId is unique so a webhook and the
+  // client callback can't double-apply the same capture.
+  providerOrderId   String? @map("provider_order_id")
+  providerPaymentId String? @unique @map("provider_payment_id")
+
+  metadata Json @default("{}")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, orderId])
+  @@index([tenantId, status])
+  @@map("payments")
+}
+
+enum PaymentStatus {
+  CREATED // intent created at the gateway, awaiting the shopper
+  AUTHORIZED
+  CAPTURED // money captured — the order can move to PAID
+  FAILED
+  REFUNDED
+
+  @@map("payment_status")
+}
+
+// ---------------------------------------------------------------------------
+// Shipping. Carrier-pluggable exactly like payments: each tenant connects their
+// OWN carrier account (Shiprocket, Shipmojo, or a manual/flat-rate mode). Public
+// settings (origin pincode, flat-rate rules) live in `config`; carrier login
+// credentials live encrypted in `secretsEnc`. Rate quotes drive Order.shippingCents
+// at checkout; a Shipment is the fulfilment record created after an order is paid.
+// ---------------------------------------------------------------------------
+model ShippingAccount {
+  tenantId String @id @map("tenant_id")
+
+  provider String  @default("manual") // shiprocket | shipmojo | manual
+  enabled  Boolean @default(true)
+
+  // Non-secret carrier settings: { originPostalCode, mode, flatCents, ... }.
+  config Json @default("{}")
+
+  // SecretBox token wrapping the carrier's credentials (JSON), never returned.
+  secretsEnc String? @map("secrets_enc")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("shipping_accounts")
+}
+
+model Shipment {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  orderId  String @map("order_id")
+
+  provider String
+  status   ShipmentStatus @default(PENDING)
+
+  carrierName String? @map("carrier_name")
+  awb         String? @map("awb") // air waybill / tracking number
+  trackingUrl String? @map("tracking_url")
+  costCents   Int     @default(0) @map("cost_cents")
+
+  providerShipmentId String? @map("provider_shipment_id")
+  metadata           Json    @default("{}")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, orderId])
+  @@map("shipments")
+}
+
+enum ShipmentStatus {
+  PENDING // not yet handed to a carrier
+  CREATED // shipment/AWB created at the carrier
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+  FAILED
+
+  @@map("shipment_status")
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail — append-only record of who did what. Written automatically for
+// every state-changing request (and explicitly for security-relevant actions),
+// so "which principal hit what" is answerable after the fact. Tenant-owned and
+// RLS-protected like everything else; platform/cross-tenant writes go through
+// asPlatform.
+// ---------------------------------------------------------------------------
 model AuditLog {
-  id            String   @id @default(uuid())
-  tenantId      String?
-  tenant        Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
-  actorId       String?
-  actorEmail    String?
-  action        String
-  resourceType  String
-  resourceId    String?
-  previousValue Json?
-  newValue      Json?
-  ip            String?
-  userAgent     String?
-  success       Boolean  @default(true)
-  createdAt     DateTime @default(now())
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
 
+  actorKind String  @map("actor_kind") // staff | customer | internal | system
+  actorId   String? @map("actor_id") // userId | customerId | product slug
+
+  action     String // e.g. "product.create", "POST /tenants/:id/products"
+  target     String? // affected resource id, when known
+  method     String
+  route      String
+  statusCode Int     @map("status_code")
+
+  requestId String? @map("request_id")
+  ipAddress String? @map("ip_address")
+  metadata  Json    @default("{}") // redacted params/diff
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
   @@index([tenantId, createdAt])
-  @@index([action])
+  @@index([tenantId, action])
+  @@map("audit_logs")
+}
+
+// ===========================================================================
+// Identity & RBAC — folded in from the former auth-rbac-service so ecom is a
+// self-contained, standalone application. ecom now signs its own RS256 tokens
+// and serves its own JWKS; it never calls an external identity service.
+//
+// Two identity kinds, deliberately different in scope:
+//   * User      — GLOBAL staff identity (one email = one person platform-wide),
+//                 may belong to many stores via UserTenantRole. NOT tenant-scoped.
+//   * Customer  — a shopper of ONE store; the same email is a separate account
+//                 at every store (Shopify model). Tenant-scoped, RLS-protected.
+//
+// Global identity tables (User, UserIdentity, PlatformAdmin, Session,
+// CustomerSession, Permission) are NOT under RLS — they are queried on the
+// plain client, never through forTenant(). Tenant-scoped identity tables
+// (Role, UserTenantRole, Customer, Domain) ARE under RLS (see prisma/rls.sql).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Permission catalog — one row per `resource:action` key. Single product, so
+// keyed by `key` alone. Seeded from src/modules/permissions/permission-catalog.ts.
+// ---------------------------------------------------------------------------
+model Permission {
+  id          String @id @default(cuid())
+  key         String @unique // e.g. "products:write"
+  description String
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+// ---------------------------------------------------------------------------
+// User — GLOBAL staff identity. One email = one user across the platform.
+// Security columns (passwordHash, mfaSecret, backup codes) are NEVER serialized.
+// ---------------------------------------------------------------------------
+model User {
+  id            String  @id @default(cuid())
+  email         String  @unique
+  emailVerified Boolean @default(false) @map("email_verified")
+  name          String?
+
+  passwordHash          String?  @map("password_hash")
+  passwordPepperVersion Int?     @map("password_pepper_version")
+  mfaSecret             String?  @map("mfa_secret") // AES-256-GCM encrypted at rest
+  mfaEnabled            Boolean  @default(false) @map("mfa_enabled")
+  mfaBackupCodes        String[] @default([]) @map("mfa_backup_codes") // SHA-256 hashes, single-use
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  metadata  Json      @default("{}")
+
+  identities    UserIdentity[]
+  memberships   UserTenantRole[]
+  sessions      Session[]
+  platformAdmin PlatformAdmin?
+
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// User identities — links password + OAuth providers to one global user.
+// ---------------------------------------------------------------------------
+model UserIdentity {
+  id             String       @id @default(cuid())
+  userId         String       @map("user_id")
+  provider       AuthProvider
+  providerUserId String       @map("provider_user_id") // provider subject; PASSWORD uses the userId
+  emailAtLink    String       @map("email_at_link")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("user_identities")
+}
+
+enum AuthProvider {
+  PASSWORD
+  GOOGLE
+  GITHUB
+  FACEBOOK
+  TWITTER
+
+  @@map("auth_provider")
+}
+
+// ---------------------------------------------------------------------------
+// Platform admins — deliberately SEPARATE from tenant roles. Grants the
+// audited RLS-bypass (asPlatform) path; never mixed into a tenant permission check.
+// ---------------------------------------------------------------------------
+model PlatformAdmin {
+  id     String       @id @default(cuid())
+  userId String       @unique @map("user_id")
+  role   PlatformRole @default(SUPPORT)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("platform_admins")
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+  SUPPORT
+
+  @@map("platform_role")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions — one row per issued staff refresh token. Only a hash is stored;
+// rotation revokes the old row (replacedById) and reuse of a revoked token
+// nukes the lineage.
+// ---------------------------------------------------------------------------
+model Session {
+  id               String    @id @default(cuid())
+  userId           String    @map("user_id")
+  tenantId         String?   @map("tenant_id")
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  replacedById     String?   @map("replaced_by_id")
+  userAgent        String?   @map("user_agent")
+  ipAddress        String?   @map("ip_address")
+  expiresAt        DateTime  @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  lastUsedAt DateTime @default(now()) @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Roles — predefined (tenantId NULL, a system template) or custom (tenantId set,
+// belongs to one tenant). `grantOnProvision` marks the role auto-granted to a
+// new store's founder; `isProtected` drives the last-admin invariant — both by
+// flag, never by role name.
+// ---------------------------------------------------------------------------
+model Role {
+  id               String  @id @default(cuid())
+  tenantId         String? @map("tenant_id") // NULL => system template
+  name             String
+  isSystemRole     Boolean @default(false) @map("is_system_role")
+  grantOnProvision Boolean @default(false) @map("grant_on_provision")
+  isProtected      Boolean @default(false) @map("is_protected")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant          Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  memberships     UserTenantRole[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("roles")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// User <-> tenant <-> role. A staff (or customer) membership within one store.
+// ---------------------------------------------------------------------------
+model UserTenantRole {
+  id       String           @id @default(cuid())
+  userId   String           @map("user_id")
+  tenantId String           @map("tenant_id")
+  roleId   String           @map("role_id")
+  type     MembershipType   @default(STAFF)
+  status   MembershipStatus @default(ACTIVE)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("user_tenant_roles")
+}
+
+enum MembershipType {
+  STAFF
+  CUSTOMER
+
+  @@map("membership_type")
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+
+  @@map("membership_status")
+}
+
+// ---------------------------------------------------------------------------
+// Customer — a shopper of ONE store. Same email is a separate account at every
+// store (@@unique([tenantId, email])). This is the source of truth the loosely
+// coupled Order.customerId / CustomerAddress.customerId point at (no FK, same
+// RLS key). Security columns are never serialized.
+// ---------------------------------------------------------------------------
+model Customer {
+  id            String  @id @default(cuid())
+  tenantId      String  @map("tenant_id")
+  email         String
+  emailVerified Boolean @default(false) @map("email_verified")
+  name          String?
+  phone         String?
+
+  passwordHash          String? @map("password_hash")
+  passwordPepperVersion Int?    @map("password_pepper_version")
+
+  status      CustomerStatus @default(ACTIVE)
+  lastLoginAt DateTime?      @map("last_login_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  metadata  Json      @default("{}")
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions CustomerSession[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+  @@map("customers")
+}
+
+enum CustomerStatus {
+  ACTIVE
+  SUSPENDED
+
+  @@map("customer_status")
+}
+
+// ---------------------------------------------------------------------------
+// Customer sessions — mirrors Session but for the tenant-scoped Customer.
+// Global table (not RLS): looked up by refresh-token hash on the plain client.
+// ---------------------------------------------------------------------------
+model CustomerSession {
+  id               String    @id @default(cuid())
+  customerId       String    @map("customer_id")
+  tenantId         String    @map("tenant_id")
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  replacedById     String?   @map("replaced_by_id")
+  userAgent        String?   @map("user_agent")
+  ipAddress        String?   @map("ip_address")
+  expiresAt        DateTime  @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  lastUsedAt DateTime @default(now()) @map("last_used_at")
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([expiresAt])
+  @@map("customer_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Domains — subdomain + custom hostnames for a store. Richer than
+// TenantSettings.customDomain (kept as a denormalized convenience); this is the
+// source of truth for custom-domain verify + routing (Milestone 6).
+// ---------------------------------------------------------------------------
+model Domain {
+  id          String     @id @default(cuid())
+  tenantId    String     @map("tenant_id")
+  hostname    String     @unique
+  type        DomainType @default(SUBDOMAIN)
+  verified    Boolean    @default(false)
+  isPrimary   Boolean    @default(false) @map("is_primary")
+  cnameTarget String?    @map("cname_target")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("domains")
+}
+
+enum DomainType {
+  SUBDOMAIN
+  CUSTOM
+
+  @@map("domain_type")
 }

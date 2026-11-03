@@ -1,72 +1,171 @@
+import { readFileSync } from 'node:fs';
+
 import { z } from 'zod';
 
-// Fail fast at boot if required secrets/config are missing or malformed —
-// never fall back to a hardcoded default for anything security-sensitive.
-const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().default(4000),
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 characters'),
-  JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 characters'),
-  JWT_ACCESS_TTL: z.string().default('15m'),
-  JWT_REFRESH_TTL: z.string().default('30d'),
-  CORS_ORIGINS: z.string().default(''),
-  COOKIE_SECURE: z
-    .string()
-    .default('false')
-    .transform((v) => v === 'true'),
-  // Optional at boot (not every environment needs payments configured yet) — PaymentsService
-  // fails loudly at the point of use, not silently, if these are missing. See its constructor.
-  // An empty string (var present but unset in .env) is treated the same as unset.
-  RAZORPAY_KEY_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  RAZORPAY_KEY_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  RAZORPAY_WEBHOOK_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  PLATFORM_JWT_SECRET: z.string().min(32, 'PLATFORM_JWT_SECRET must be at least 32 characters'),
-  // Which tenant the public storefront (GET /storefront/*) serves. Unset = storefront routes
-  // return 503 rather than guessing a tenant. See storefront.service.ts ponytail note.
-  STOREFRONT_TENANT_SLUG: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+/**
+ * Boot-time environment validation. The process refuses to start on a missing
+ * or malformed value — configuration errors surface at deploy, never as a
+ * confusing runtime failure mid-request.
+ */
+const csv = (value: string): string[] =>
+  value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  // Where the browser lands after a social login redirect round-trip.
-  FRONTEND_URL: z.string().url().default('http://localhost:3000'),
-  // Base URL this API is reachable at — used to build each provider's callback URL.
-  BACKEND_URL: z.string().url().default('http://localhost:4000'),
+const booleanString = z.enum(['true', 'false']).transform((v) => v === 'true');
 
-  // Social login: each provider is independently optional at boot (OAuthService rejects a
-  // login attempt for a provider whose credentials aren't set, rather than crashing on boot —
-  // same pattern as Razorpay above). Empty string is treated as unset.
-  GOOGLE_CLIENT_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  GOOGLE_CLIENT_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  FACEBOOK_CLIENT_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  FACEBOOK_CLIENT_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  MICROSOFT_CLIENT_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  MICROSOFT_CLIENT_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  TWITTER_CLIENT_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  TWITTER_CLIENT_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-
-  // Notifications: all optional at boot, same lazy-client pattern as Razorpay above — each
-  // service throws only when actually called unconfigured, and every call site swallows that.
-  RESEND_API_KEY: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  RESEND_FROM_EMAIL: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  TWILIO_ACCOUNT_SID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  TWILIO_AUTH_TOKEN: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  TWILIO_SMS_FROM: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  TWILIO_WHATSAPP_FROM: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-  // RazorpayX Payouts — automatic referral commission payout. Same merchant key as RAZORPAY_KEY_ID/
-  // SECRET works if RazorpayX is enabled on the account; the account number identifies which
-  // RazorpayX current account funds the payout.
-  RAZORPAYX_ACCOUNT_NUMBER: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
-});
-
-export type EnvConfig = z.infer<typeof envSchema>;
-
-export function validateEnv(config: Record<string, unknown>): EnvConfig {
-  const parsed = envSchema.safeParse(config);
-  if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n');
-    throw new Error(`Invalid environment configuration:\n${issues}`);
+/** Read a PEM key from a file path, failing boot with a clear message if absent. */
+function readKeyFile(path: string | undefined, name: string): string {
+  if (!path) {
+    throw new Error(`Either ${name} or ${name}_FILE must be set`);
   }
-  if (parsed.data.JWT_ACCESS_SECRET === parsed.data.JWT_REFRESH_SECRET) {
-    throw new Error('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different');
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    throw new Error(`Could not read ${name}_FILE at "${path}"`);
+  }
+}
+
+export const envSchema = z
+  .object({
+    APP_ENV: z.enum(['development', 'staging', 'production']).default('development'),
+    NODE_ENV: z.string().default('development'),
+    PORT: z.coerce.number().int().positive().default(4001),
+    API_PREFIX: z.string().default('v1'),
+    CORS_ORIGINS: z.string().default('').transform(csv),
+
+    // Minimum log level (verbose < debug < log < warn < error < fatal). At
+    // `debug` the access log prints request payloads. `pretty` is human console
+    // (local dev); `json` is one structured line per event (staging/prod).
+    LOG_LEVEL: z.enum(['verbose', 'debug', 'log', 'warn', 'error', 'fatal']).default('log'),
+    LOG_FORMAT: z.enum(['json', 'pretty']).default('pretty'),
+
+    DATABASE_URL: z.string().url(),
+    DIRECT_URL: z.string().url(),
+    REDIS_URL: z.string().url(),
+
+    S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
+    S3_REGION: z.string().min(1).default('us-east-1'),
+    S3_BUCKET: z.string().min(3).default('ecom-media'),
+    S3_ACCESS_KEY: z.string().min(1).default('ecom-local'),
+    S3_SECRET_KEY: z.string().min(8).default('ecom-local-secret'),
+    S3_FORCE_PATH_STYLE: booleanString.default('true'),
+
+    // Master key for encrypting per-tenant secrets at rest (payment gateway keys,
+    // webhook secrets). Base64 of exactly 32 random bytes. Generate with:
+    //   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+    APP_ENCRYPTION_KEY: z
+      .string()
+      .refine((v) => Buffer.from(v, 'base64').length === 32, {
+        message: 'APP_ENCRYPTION_KEY must be base64 of exactly 32 bytes (a 256-bit key).',
+      }),
+
+    // --- Native identity: RS256 signing keys ---------------------------------
+    // ecom signs its own access tokens and serves its own JWKS. Provide each key
+    // inline (JWT_*_KEY) or via a file path (JWT_*_KEY_FILE); exactly one of each.
+    JWT_PRIVATE_KEY: z.string().optional(),
+    JWT_PRIVATE_KEY_FILE: z.string().optional(),
+    JWT_PUBLIC_KEY: z.string().optional(),
+    JWT_PUBLIC_KEY_FILE: z.string().optional(),
+    JWT_KEY_ID: z.string().min(1).default('ecom-dev-1'),
+    JWT_ISSUER: z.string().min(1).default('ecom'),
+    JWT_AUDIENCE: z.string().min(1).default('ecom'),
+    ACCESS_TOKEN_TTL: z.coerce.number().int().positive().default(900),
+    REFRESH_TOKEN_TTL: z.coerce.number().int().positive().default(2_592_000),
+
+    // Argon2id server-side pepper + version (for rotation). See PasswordService.
+    PASSWORD_PEPPER: z
+      .string()
+      .min(16, 'PASSWORD_PEPPER must be at least 16 chars')
+      .default('change-me-to-a-long-random-string-in-every-environment'),
+    PASSWORD_PEPPER_VERSION: z.coerce.number().int().positive().default(1),
+
+    // Keyed HMAC secret for hashing high-entropy opaque tokens (e.g. internal keys).
+    API_KEY_HASH_SECRET: z
+      .string()
+      .min(16, 'API_KEY_HASH_SECRET must be at least 16 chars')
+      .default('change-me-api-key-hash-secret-please'),
+
+    // Shared secret for trusted server-to-server calls via the X-Internal-Key header.
+    INTERNAL_API_KEY: z.string().min(16).default('change-me-internal-api-key-please-rotate'),
+
+    // Cookie attributes for staff/customer session cookies set by the backend.
+    COOKIE_DOMAIN: z.string().default('localhost'),
+    COOKIE_SECURE: booleanString.default('false'),
+
+    // --- Transactional email -------------------------------------------------
+    // `console` prints the message (dev — grab links from logs); `smtp` sends via
+    // the SMTP_* transport. Links point at APP_BASE_URL (the storefront/frontend).
+    EMAIL_TRANSPORT: z.enum(['console', 'smtp']).default('console'),
+    EMAIL_FROM: z.string().default('ecom <no-reply@localhost>'),
+    APP_BASE_URL: z.string().url().default('http://localhost:3000'),
+    SMTP_HOST: z.string().optional(),
+    SMTP_PORT: z.coerce.number().int().positive().default(587),
+    SMTP_SECURE: booleanString.default('false'),
+    SMTP_USER: z.string().optional(),
+    SMTP_PASSWORD: z.string().optional(),
+
+    RATE_LIMIT_AUTH_PER_MINUTE: z.coerce.number().int().positive().default(10),
+    RATE_LIMIT_GENERAL_PER_MINUTE: z.coerce.number().int().positive().default(120),
+    RATE_LIMIT_CHECKOUT_PER_MINUTE: z.coerce.number().int().positive().default(20),
+    RATE_LIMIT_TENANT_PER_MINUTE: z.coerce.number().int().positive().default(600),
+  })
+  .transform((env) => {
+    // Resolve signing keys from inline value or file path. Deferred here (not in
+    // the field schema) so a file is read only once, after all fields parse.
+    const jwtPrivateKey = env.JWT_PRIVATE_KEY ?? readKeyFile(env.JWT_PRIVATE_KEY_FILE, 'JWT_PRIVATE_KEY');
+    const jwtPublicKey = env.JWT_PUBLIC_KEY ?? readKeyFile(env.JWT_PUBLIC_KEY_FILE, 'JWT_PUBLIC_KEY');
+    return { ...env, jwtPrivateKey, jwtPublicKey };
+  })
+  .superRefine((env, ctx) => {
+    // A production deploy must not ship an all-zero (placeholder) encryption key.
+    if (env.APP_ENV === 'production' && Buffer.from(env.APP_ENCRYPTION_KEY, 'base64').every((b) => b === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['APP_ENCRYPTION_KEY'],
+        message: 'Refusing to boot in production with a placeholder (all-zero) APP_ENCRYPTION_KEY.',
+      });
+    }
+
+    // Native-identity production safety rails: refuse to boot with any secret
+    // still at its dev default, an insecure cookie, or the console mailer.
+    if (env.APP_ENV === 'production') {
+      if (!env.COOKIE_SECURE) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['COOKIE_SECURE'], message: 'COOKIE_SECURE must be true in production' });
+      }
+      if (env.PASSWORD_PEPPER.startsWith('change-me')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['PASSWORD_PEPPER'], message: 'PASSWORD_PEPPER is still the default value' });
+      }
+      if (env.API_KEY_HASH_SECRET.startsWith('change-me')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['API_KEY_HASH_SECRET'], message: 'API_KEY_HASH_SECRET is still the default value' });
+      }
+      if (env.INTERNAL_API_KEY.startsWith('change-me')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['INTERNAL_API_KEY'], message: 'INTERNAL_API_KEY is still the default value' });
+      }
+      if (env.EMAIL_TRANSPORT === 'console') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['EMAIL_TRANSPORT'], message: 'EMAIL_TRANSPORT must be "smtp" in production' });
+      }
+      if (env.S3_ACCESS_KEY === 'ecom-local' || env.S3_SECRET_KEY === 'ecom-local-secret') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_ACCESS_KEY'], message: 'S3 credentials are still development defaults' });
+      }
+    }
+
+    // SMTP host is required whenever the SMTP transport is selected.
+    if (env.EMAIL_TRANSPORT === 'smtp' && !env.SMTP_HOST) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['SMTP_HOST'], message: 'SMTP_HOST is required when EMAIL_TRANSPORT=smtp' });
+    }
+  });
+
+export type Env = z.infer<typeof envSchema>;
+
+export function validateEnv(raw: Record<string, unknown>): Env {
+  const parsed = envSchema.safeParse(raw);
+  if (!parsed.success) {
+    const details = parsed.error.issues
+      .map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('\n');
+    throw new Error(`Invalid environment configuration:\n${details}`);
   }
   return parsed.data;
 }

@@ -1,18 +1,25 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
-/** Fades + lifts children in once they scroll into view. Respects prefers-reduced-motion via CSS. */
+/**
+ * Scroll-reveal wrapper — the only client JS on the marketing page. The content
+ * is server-rendered (SEO-safe); this just toggles a class when the element
+ * scrolls into view so the CSS transition in globals.css runs. Honors
+ * prefers-reduced-motion via the CSS itself. `delay` staggers grouped items.
+ */
 export function Reveal({
   children,
   delay = 0,
+  as: Tag = 'div',
   className = '',
 }: {
-  children: React.ReactNode;
-  delay?: 0 | 1 | 2 | 3;
+  children: ReactNode;
+  delay?: number;
+  as?: 'div' | 'li' | 'section' | 'span';
   className?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLElement | null>(null);
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
@@ -25,23 +32,23 @@ export function Reveal({
           observer.disconnect();
         }
       },
-      { threshold: 0.15 },
+      // threshold 0.01: fires as soon as any part is visible. A tall section
+      // (e.g. the hero) can sit on screen at 0.15 threshold — a section taller
+      // than the viewport by 15% would then never cross it on initial paint,
+      // staying invisible until the next scroll re-triggers the observer.
+      { threshold: 0.01, rootMargin: '0px 0px -40px 0px' },
     );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
-  const delayClass = delay ? `delay-${delay * 100}` : '';
-
   return (
-    <div
-      ref={ref}
-      data-visible={visible}
-      className={`group/reveal transition-all duration-700 ease-md motion-reduce:transition-none ${delayClass} ${
-        visible ? 'translate-y-0 opacity-100' : 'translate-y-7 opacity-0'
-      } ${className}`}
+    <Tag
+      ref={ref as never}
+      className={`reveal ${visible ? 'is-visible' : ''} ${className}`}
+      style={delay ? { transitionDelay: `${delay}ms` } : undefined}
     >
       {children}
-    </div>
+    </Tag>
   );
 }

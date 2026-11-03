@@ -1,14 +1,55 @@
+# Local development infrastructure for the ecom backend.
+# Ports are shifted off the auth-rbac-service defaults (5432/6379) so both
+# services can run side by side on one machine.
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: ecom-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ecom
-      POSTGRES_PASSWORD: ecom
-      POSTGRES_DB: ecom_saas
+      POSTGRES_PASSWORD: localdev_password
+      POSTGRES_DB: ecom
     ports:
-      - '5432:5432'
+      - '5433:5432'
     volumes:
       - ecom_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ecom -d ecom']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecom-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6380:6379'
+    volumes:
+      - ecom_redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: ecom-minio
+    restart: unless-stopped
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ecom-local
+      MINIO_ROOT_PASSWORD: ecom-local-secret
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - ecom_miniodata:/data
 
 volumes:
   ecom_pgdata:
+  ecom_redisdata:
+  ecom_miniodata:
