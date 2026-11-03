@@ -1,98 +1,137 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+import 'server-only';
 
-export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
-  }
+import { cookies } from 'next/headers';
+
+import { ACCESS_TOKEN_COOKIE } from './admin-auth';
+
+/**
+ * Server-side client for the ecom backend. Runs only in Server Components / Route
+ * Handlers, never in the browser, so it can forward the httpOnly access-token
+ * cookie as a Bearer credential. The backend remains the security boundary; this
+ * is a convenience wrapper with typed helpers.
+ */
+const BASE = process.env.ECOM_API_URL ?? 'http://localhost:4001';
+
+export { ACCESS_TOKEN_COOKIE };
+
+export interface ApiError {
+  code: string;
+  message: string;
+  status: number;
 }
 
-// Access token lives in memory only — never localStorage, never a JS-readable cookie.
-// A hard refresh loses it; the AuthProvider silently rehydrates via the httpOnly
-// refresh cookie on mount. See lib/auth-context.tsx.
-let accessToken: string | null = null;
-export function setAccessToken(token: string | null) {
-  accessToken = token;
+interface StoreLookup {
+  tenant_id: string;
+  slug: string;
+  store_name: string;
 }
 
-// Which tenant's public storefront this browser tab is shopping. Sent only on public /storefront/*
-// calls (see StoreProvider); the backend falls back to its default store when it's absent.
-let storeSlug: string | null = null;
-export function setStoreSlug(slug: string | null) {
-  storeSlug = slug;
-}
-
-let refreshing: Promise<boolean> | null = null;
-
-async function tryRefresh(): Promise<boolean> {
-  refreshing ??= fetch(`${API_URL}/auth/refresh`, { method: 'POST', credentials: 'include' })
-    .then(async (res) => {
-      if (!res.ok) return false;
-      const body = await res.json();
-      setAccessToken(body.accessToken);
-      return true;
-    })
-    .catch(() => false)
-    .finally(() => {
-      refreshing = null;
-    });
-  return refreshing;
-}
-
-interface RequestOptions {
-  method?: string;
+type FetchOpts = {
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
-  skipAuthRetry?: boolean;
-}
+  auth?: boolean; // attach the caller's bearer token
+  revalidate?: number | false;
+};
 
-/** Fetch wrapper: attaches the in-memory access token, retries once through a silent refresh on 401. */
-export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
+async function api<T>(path: string, opts: FetchOpts = {}): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+  if (opts.auth) {
+    const token = (await cookies()).get(ACCESS_TOKEN_COOKIE)?.value;
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${BASE}/v1${path}`, {
     method: opts.method ?? 'GET',
-    credentials: 'include',
-    headers: {
-      ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(storeSlug && path.startsWith('/storefront') && !path.startsWith('/storefront/admin') ? { 'x-store-slug': storeSlug } : {}),
-    },
+    headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
+    next: opts.revalidate === undefined ? undefined : { revalidate: opts.revalidate || 0 },
+    cache: opts.revalidate === false ? 'no-store' : undefined,
   });
 
-  if (res.status === 401 && !opts.skipAuthRetry) {
-    const ok = await tryRefresh();
-    if (ok) return api<T>(path, { ...opts, skipAuthRetry: true });
-  }
-
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ message: res.statusText }));
-    throw new ApiError(res.status, body.message ?? 'Request failed');
+    let code = 'error';
+    let message = res.statusText;
+    try {
+      const body = (await res.json()) as { error?: { code?: string; message?: string } };
+      code = body.error?.code ?? code;
+      message = body.error?.message ?? message;
+    } catch {
+      /* non-JSON error body */
+    }
+    const err: ApiError = { code, message, status: res.status };
+    throw err;
   }
 
   if (res.status === 204) return undefined as T;
-  return res.json();
-}
 
-/** Downloads a binary response (e.g. a PDF) with the same auth header/refresh-retry as api(), and saves it via a throwaway blob link. */
-export async function apiDownload(path: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_URL}${path}`, {
-    credentials: 'include',
-    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
-  });
-  if (res.status === 401) {
-    const ok = await tryRefresh();
-    if (ok) return apiDownload(path, filename);
+  // The backend wraps every success as { data, meta }. Unwrap to the payload;
+  // a paginated payload keeps its own { data, next_cursor, has_more } shape.
+  const body = (await res.json()) as { data?: T } | T;
+  if (body && typeof body === 'object' && 'data' in body && 'meta' in (body as object)) {
+    return (body as { data: T }).data;
   }
-  if (!res.ok) throw new ApiError(res.status, 'Download failed');
-
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
+  return body as T;
 }
 
-export { API_URL, tryRefresh };
+export const ecomApi = {
+  resolveStore: (slug: string) =>
+    api<StoreLookup>(`/stores/lookup?slug=${encodeURIComponent(slug)}`, { revalidate: 60 }),
+  // Public storefront reads (no auth) — cached briefly.
+  storefrontConfig: (tenantId: string, previewToken?: string) =>
+    api<import('./types').StoreConfig>(`/storefront/${tenantId}/config${previewToken ? `?preview_token=${encodeURIComponent(previewToken)}` : ''}`, { revalidate: previewToken ? false : 60 }),
+  storefrontProducts: (tenantId: string, query = '') =>
+    api<import('./types').Page<import('./types').Product>>(
+      `/storefront/${tenantId}/products${query}`,
+      { revalidate: 30 },
+    ),
+  storefrontProduct: (tenantId: string, id: string) =>
+    api<import('./types').Product>(`/storefront/${tenantId}/products/${id}`, { revalidate: 30 }),
+  storefrontCategories: (tenantId: string) =>
+    api<import('./types').Category[]>(`/storefront/${tenantId}/categories`, { revalidate: 60 }),
+  storefrontFlashSales: (tenantId: string) =>
+    api<import('./types').ActiveFlashSale[]>(`/storefront/${tenantId}/flash-sales/active`, { revalidate: 30 }),
+
+  // Admin reads (bearer) — never cached.
+  adminProducts: (tenantId: string, query = '') =>
+    api<import('./types').Page<import('./types').Product>>(`/tenants/${tenantId}/products${query}`, {
+      auth: true,
+      revalidate: false,
+    }),
+  adminProduct: (tenantId: string, id: string) =>
+    api<import('./types').Product>(`/tenants/${tenantId}/products/${id}`, {
+      auth: true,
+      revalidate: false,
+    }),
+  adminCategories: (tenantId: string) =>
+    api<import('./types').Category[]>(`/tenants/${tenantId}/categories`, {
+      auth: true,
+      revalidate: false,
+    }),
+  adminOrders: (tenantId: string, query = '') =>
+    api<import('./types').Page<import('./types').Order>>(`/tenants/${tenantId}/orders${query}`, {
+      auth: true,
+      revalidate: false,
+    }),
+  adminFlashSales: (tenantId: string) =>
+    api<import('./types').FlashSale[]>(`/tenants/${tenantId}/flash-sales`, {
+      auth: true,
+      revalidate: false,
+    }),
+  entitlements: (tenantId: string) =>
+    api<import('./types').Entitlements>(`/tenants/${tenantId}/billing/entitlements`, {
+      auth: true,
+      revalidate: false,
+    }),
+  storeSettings: (tenantId: string) =>
+    api<import('./types').StoreConfig>(`/tenants/${tenantId}/settings`, {
+      auth: true,
+      revalidate: false,
+    }),
+  storeDesign: (tenantId: string) =>
+    api<import('./types').StoreDesignState>(`/tenants/${tenantId}/design`, { auth: true, revalidate: false }),
+  mediaAssets: (tenantId: string) =>
+    api<import('./types').MediaAsset[]>(`/tenants/${tenantId}/media`, { auth: true, revalidate: false }),
+};
+
+export { api };
