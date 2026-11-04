@@ -42,7 +42,8 @@ module "frontend" {
 
   # NEXT_PUBLIC_* is public by design (inlined into the browser bundle) — never put secrets here.
   environment = {
-    NEXT_PUBLIC_API_URL    = local.backend_url
-    NEXT_PUBLIC_STORE_NAME = var.store_name
+    NEXT_PUBLIC_ECOM_API_URL = local.backend_url
+    ECOM_API_URL             = local.backend_url
+    NEXT_PUBLIC_STORE_NAME   = var.store_name
   }
 }

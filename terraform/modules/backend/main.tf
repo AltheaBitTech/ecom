@@ -1,4 +1,4 @@
-# NestJS API. backend/vercel.json routes every request to api/index.ts (@vercel/node), and
+# NestJS API. backend/vercel.json routes every request to api/index.ts (@vercel/node), which reuses createApp() from src/create-app.ts, and
 # backend's `postinstall` runs `prisma generate`, so no build/install overrides are needed.
 resource "vercel_project" "this" {
   name                       = var.name
