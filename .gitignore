@@ -1,7 +1,16 @@
-# Keep reference PDFs and the local dev launcher out of the repo
+.DS_Store
 *.pdf
 dev.sh
+.dev-logs/
+.claude/settings.local.json
+template-designs/
+
 
 # Build/test artifacts
 .next/
 output/
+.playwright-cli/
+.vercel
+
+# Local copies of Vercel env vars (contain secrets)
+vercel.env
