@@ -31,11 +31,17 @@ export class EmailService {
   private readonly from: string;
   private readonly baseUrl: string;
   private readonly consoleMode: boolean;
+  private readonly redact: boolean;
 
   constructor(config: AppConfig) {
     this.from = config.emailFrom;
     this.baseUrl = config.appBaseUrl.replace(/\/+$/, '');
-    this.consoleMode = config.emailTransport === 'console';
+    // No SMTP host = console mode. In production, never log the body: it carries secret tokens.
+    this.consoleMode = config.emailTransport === 'console' || !config.smtpHost;
+    this.redact = config.isProduction;
+    if (this.consoleMode && this.redact) {
+      this.logger.warn('SMTP not configured: emails (verification, password reset, invites) will NOT be sent.');
+    }
     this.transporter = this.consoleMode
       ? null
       : createTransport({
@@ -84,7 +90,7 @@ export class EmailService {
 
   private async send(msg: Message): Promise<void> {
     if (this.consoleMode || !this.transporter) {
-      this.logger.warn(`[email:console] to=${msg.to} subject="${msg.subject}"\n${msg.text}`);
+      this.logger.warn(`[email:console] to=${msg.to} subject="${msg.subject}"${this.redact ? ' (not sent: SMTP not configured)' : `\n${msg.text}`}`);
       return;
     }
     await this.transporter.sendMail({ from: this.from, ...msg });

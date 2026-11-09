@@ -115,8 +115,10 @@ export const envSchema = z
   .transform((env) => {
     // Resolve signing keys from inline value or file path. Deferred here (not in
     // the field schema) so a file is read only once, after all fields parse.
-    const jwtPrivateKey = env.JWT_PRIVATE_KEY ?? readKeyFile(env.JWT_PRIVATE_KEY_FILE, 'JWT_PRIVATE_KEY');
-    const jwtPublicKey = env.JWT_PUBLIC_KEY ?? readKeyFile(env.JWT_PUBLIC_KEY_FILE, 'JWT_PUBLIC_KEY');
+    // Inline PEMs may arrive single-line with literal "\n" (dashboards/.env files); unescape them.
+    const unescape = (pem?: string) => pem?.replace(/\\n/g, '\n');
+    const jwtPrivateKey = unescape(env.JWT_PRIVATE_KEY) ?? readKeyFile(env.JWT_PRIVATE_KEY_FILE, 'JWT_PRIVATE_KEY');
+    const jwtPublicKey = unescape(env.JWT_PUBLIC_KEY) ?? readKeyFile(env.JWT_PUBLIC_KEY_FILE, 'JWT_PUBLIC_KEY');
     return { ...env, jwtPrivateKey, jwtPublicKey };
   })
   .superRefine((env, ctx) => {
@@ -144,17 +146,8 @@ export const envSchema = z
       if (env.INTERNAL_API_KEY.startsWith('change-me')) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['INTERNAL_API_KEY'], message: 'INTERNAL_API_KEY is still the default value' });
       }
-      if (env.EMAIL_TRANSPORT === 'console') {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['EMAIL_TRANSPORT'], message: 'EMAIL_TRANSPORT must be "smtp" in production' });
-      }
-      if (env.S3_ACCESS_KEY === 'ecom-local' || env.S3_SECRET_KEY === 'ecom-local-secret') {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_ACCESS_KEY'], message: 'S3 credentials are still development defaults' });
-      }
-    }
-
-    // SMTP host is required whenever the SMTP transport is selected.
-    if (env.EMAIL_TRANSPORT === 'smtp' && !env.SMTP_HOST) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['SMTP_HOST'], message: 'SMTP_HOST is required when EMAIL_TRANSPORT=smtp' });
+      // Email (SMTP) and media storage (S3) are optional: EmailService and
+      // MediaStorageService warn at boot and degrade instead of refusing to start.
     }
   });
 

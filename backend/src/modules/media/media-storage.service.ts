@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { CreateBucketCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, PutBucketCorsCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -19,6 +19,11 @@ export class MediaStorageService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    if (this.config.isProduction && this.config.s3AccessKey === 'ecom-local') {
+      // ponytail: no storage configured; uploads fail until S3_* is set.
+      new Logger(MediaStorageService.name).warn('S3 not configured: media uploads are disabled.');
+      return;
+    }
     try {
       await this.client.send(new HeadBucketCommand({ Bucket: this.config.s3Bucket }));
     } catch {
