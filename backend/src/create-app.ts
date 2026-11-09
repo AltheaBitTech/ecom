@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { ExpressAdapter } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 
@@ -14,7 +15,9 @@ import { createLogger, enabledLevels } from './common/observability/json-logger.
 export async function createApp(): Promise<INestApplication> {
   // rawBody: preserve the exact bytes of incoming requests so payment webhooks
   // can verify their HMAC signature over the untouched payload.
-  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
+  // Explicit adapter: Nest otherwise require()s platform-express dynamically, which
+  // Vercel's file tracing can't see, so express is missing from the function bundle.
+  const app = await NestFactory.create(AppModule, new ExpressAdapter(), { bufferLogs: true, rawBody: true });
   const config = app.get(AppConfig);
 
   // Swap Nest's default logger for the level-aware, request-correlated logger.
