@@ -45,7 +45,7 @@ export class AppConfig {
   get directUrl(): string {
     return this.get('DIRECT_URL');
   }
-  get redisUrl(): string {
+  get redisUrl(): string | undefined {
     return this.get('REDIS_URL');
   }
   get s3Endpoint(): string { return this.get('S3_ENDPOINT'); }

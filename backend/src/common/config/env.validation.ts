@@ -43,7 +43,8 @@ export const envSchema = z
 
     DATABASE_URL: z.string().url(),
     DIRECT_URL: z.string().url(),
-    REDIS_URL: z.string().url(),
+    // Optional: without it, ephemeral auth state lives in process memory (see RedisService).
+    REDIS_URL: z.string().url().optional(),
 
     S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
     S3_REGION: z.string().min(1).default('us-east-1'),
